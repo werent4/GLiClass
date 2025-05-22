@@ -8,13 +8,13 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 
-from transformers import PreTrainedModel, AutoConfig, AutoModel
+from transformers import PreTrainedModel, AutoConfig, AutoModel, Wav2Vec2Model
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import (logging)
 from transformers.models.auto import AutoModel
 from .config import GLiClassModelConfig
-from .layers import FeaturesProjector, LstmSeq2SeqEncoder, BiEncoderProjector, LayerwiseAttention
+from .layers import FeaturesProjector, LstmSeq2SeqEncoder, BiEncoderProjector, LayerwiseAttention, AudioBiEncoderProjector
 from .poolings import POOLING2OBJECT
 from .scorers import SCORER2OBJECT
 from .loss_functions import focal_loss_with_logits, sequence_contrastive_loss
@@ -95,7 +95,7 @@ class GLiClassPreTrainedModel(PreTrainedModel):
         return self.language_model._supports_sdpa
 
 
-class GLiClassBaseModel(nn.Module):#):
+class GLiClassBaseModel(nn.Module):
     def __init__(self, config: GLiClassModelConfig, device='cpu', **kwargs):
         super().__init__()
         self.config = config
@@ -618,7 +618,86 @@ class GLiClassBiEncoderFused(GLiClassBiEncoder):
             text_embeddings = text_embeddings if output_text_embeddings else None,
             class_embeddings = class_embeddings if output_class_embeddings else None,
         )
- 
+    
+
+class GLiClassAudio(GLiClassBaseModel):
+    def __init__(self, config: GLiClassModelConfig, from_pretrained=False):
+        super().__init__(config)
+        if config.encoder_config is None:
+            if config.encoder_model_name is None:
+                raise ValueError("You need to specify encoder model name to use it as a backbone.")
+            config.encoder_config = AutoConfig.from_pretrained(config.encoder_model_name)
+
+        if config.audio_model_config is None:
+            if config.audio_model_name is None:
+                raise ValueError("You need to specify audio model name to use it as a backbone.")
+            config.audio_model_config = AutoConfig.from_pretrained(config.audio_model_name)
+
+        def initialize_encoder(configs, model_name, from_pretrained):
+            if from_pretrained:
+                return AutoModel.from_pretrained(model_name)
+            else:
+                return AutoModel.from_config(configs)
+        self.encoder_model = initialize_encoder(config.encoder_config, config.encoder_model_name, from_pretrained)
+        self.audio_encoder = initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
+        self.audio_projector = AudioBiEncoderProjector(config)
+
+    def pool_outputs(self, audio_encoder_outputs):
+        audio_embeddings = self.pooler(audio_encoder_outputs.last_hidden_state)
+        audio_embeddings = self.audio_projector(audio_embeddings)
+        audio_embeddings = self.dropout(audio_embeddings)
+        if self.config.normalize_features:
+            audio_embeddings = nn.functional.normalize(audio_embeddings, p=2, dim=-1, eps=self.epsilon)
+        return audio_embeddings
+    
+    def encode_audio(self, input_values):
+        outputs = self.audio_encoder(input_values.squeeze(0))
+        audio_embeddings = self.pool_outputs(outputs)
+        return audio_embeddings
+    
+    def forward(self, input_ids, attention_mask, audio_input, labels=None, **kwargs):
+        audio_embeddings = self.encode_audio(audio_input)  # [batch, hidden]
+        embedding_layer = self.encoder_model.get_input_embeddings()
+        inputs_embeds = embedding_layer(input_ids)
+
+        audio_token_id = self.config.audio_token_index
+        audio_mask = input_ids == audio_token_id
+
+        for batch_idx in range(input_ids.shape[0]):
+            audio_positions = torch.where(audio_mask[batch_idx])[0]
+            if len(audio_positions) > 0:
+                inputs_embeds[batch_idx, audio_positions[0]] = audio_embeddings[batch_idx]
+
+        outputs = self.encoder_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+        classes_embedding, classes_embedding_mask, audio_final_emb, audio_mask = self._extract_class_features(outputs[0], input_ids, attention_mask)
+
+        if self.config.use_lstm:
+            audio_final_emb = self.lstm(audio_final_emb, audio_mask)
+
+        pooled_audio = self.pooler(audio_final_emb)
+        pooled_audio = self.text_projector(pooled_audio)
+        pooled_audio = self.dropout(pooled_audio)
+
+        if self.config.normalize_features:  
+            pooled_audio = nn.functional.normalize(pooled_audio, p=2, dim=-1)
+
+        classes_embedding = self.classes_projector(classes_embedding)
+
+        if self.config.normalize_features:  
+            classes_embedding = nn.functional.normalize(classes_embedding, p=2, dim=-1)
+
+        logits = self.scorer(pooled_audio, classes_embedding)
+
+        if self.config.normalize_features:
+            logits = logits * self.logit_scale.to(classes_embedding.device)
+
+        loss = self.get_loss(logits, labels, classes_embedding, classes_embedding_mask)
+
+        return GLiClassOutput(loss=loss, logits=logits, 
+                            text_embeddings=pooled_audio,
+                            class_embeddings=classes_embedding)
+
+
 
 class GLiClassModel(GLiClassPreTrainedModel):
     def __init__(self, config, from_pretrained=False):
@@ -631,10 +710,12 @@ class GLiClassModel(GLiClassPreTrainedModel):
             self.model = GLiClassBiEncoderFused(config, from_pretrained)
         elif config.architecture_type == 'encoder-decoder':
             self.model = GLiClassEncoderDecoder(config, from_pretrained)
+        elif config.architecture_type == 'audio-encoder':
+            self.model = GLiClassAudio(config, from_pretrained)
         self.post_init()
 
     def get_input_embeddings(self):
-        if self.config.architecture_type in {'uni-encoder'}:
+        if self.config.architecture_type in {'uni-encoder', 'audio-encoder'}:
             return self.model.encoder_model.get_input_embeddings()
         elif self.config.architecture_type == 'encoder-decoder':
             return self.model.encoder_decoder_model.get_input_embeddings()
@@ -657,7 +738,7 @@ class GLiClassModel(GLiClassPreTrainedModel):
             return self.model.encoder_model.tie_weights()
         elif self.config.architecture_type == 'encoder-decoder':
             return self.model.encoder_decoder_model.tie_weights()
-        elif self.config.architecture_type in {'bi-encoder', 'bi-encoder-fused'}:
+        elif self.config.architecture_type in {'bi-encoder', 'bi-encoder-fused', 'audio-encoder'}:
             return self.model.encoder_model.tie_weights()
         else:
             raise NotImplementedError('Tie weights is not implemented for bi-encoder architecture')
@@ -667,7 +748,7 @@ class GLiClassModel(GLiClassPreTrainedModel):
             model_embeds = self.model.encoder_model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
         elif self.config.architecture_type == 'encoder-decoder':
             model_embeds = self.model.encoder_decoder_model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
-        elif self.config.architecture_type in {'bi-encoder-fused'}:
+        elif self.config.architecture_type in {'bi-encoder-fused', 'audio-encoder'}:
             model_embeds = self.model.encoder_model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
         else:
             raise NotImplementedError('Resizing is not implemented for bi-encoder architecture')

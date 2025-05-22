@@ -123,6 +123,21 @@ class GLiClassDataset(Dataset):
         tokenized_inputs['labels_mask'] = torch.ones(len(class_texts))
         tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
         return tokenized_inputs
+    
+    def tokenize_and_prepare_labels_for_audiobiencoder(self, example):
+        if self.shuffle_labels:
+            random.shuffle(example['all_labels'])
+        input_text = self.prepare_prompt(example)
+        input_text.append('<<AUDIO>>')
+        input_text = ''.join(input_text)
+        label2idx = {label: idx for idx, label in enumerate(example['all_labels'])}
+        
+
+        tokenized_inputs = self.tokenize(input_text)
+        tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
+        tokenized_inputs['labels_text'] =  example['all_labels']
+        tokenized_inputs['input_audio'] = example['audio']
+        return tokenized_inputs
 
     def __len__(self):
         return len(self._data)
@@ -141,6 +156,8 @@ class GLiClassDataset(Dataset):
             model_inputs = self.tokenize_and_prepare_labels_for_encoder_decoder(example)
         elif self.architecture_type in {'bi-encoder', 'bi-encoder-fused'}:
             model_inputs = self.tokenize_and_prepare_labels_for_biencoder(example)
+        elif self.architecture_type in {'audio-encoder'}:
+            model_inputs = self.tokenize_and_prepare_labels_for_audiobiencoder(example)
         else:
             raise NotImplementedError('This architecture type is not implemented.')
         return model_inputs

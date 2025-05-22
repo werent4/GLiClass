@@ -15,8 +15,11 @@ class GLiClassModelConfig(PretrainedConfig):
         encoder_model=None,
         label_model_config=None,
         label_model_name=None,
+        audio_model_config=None,
+        audio_model_name=None,
         class_token_index = -1,
         text_token_index = -1,
+        audio_token_index=-1,
         ignore_index=-100,
         hidden_size=None,
         projector_hidden_act="gelu",
@@ -64,6 +67,24 @@ class GLiClassModelConfig(PretrainedConfig):
             self.label_model_config = None
         self.label_model_name = label_model_name
 
+        if audio_model_name is not None:
+            if isinstance(audio_model_config, dict):
+                print("Entering audio isinstance")
+                audio_model_config["model_type"] = (audio_model_config["model_type"] 
+                                                    if "model_type" in audio_model_config 
+                                                    else "wav2vec2")
+                audio_model_config = CONFIG_MAPPING[audio_model_config["model_type"]](**audio_model_config)
+            elif audio_model_config is None:
+                print("Entering audio elif")
+                audio_model_config = CONFIG_MAPPING["wav2vec2"]()
+
+            self.audio_model_config = audio_model_config
+            if audio_model_config.model_type != "wav2vec2":
+                raise ValueError(f"Currently only wav2vec2 is supported for audio model, but got {audio_model_config.model_type}")
+        else:
+            self.audio_model_config = None
+        self.audio_model_name = audio_model_name
+
         if hidden_size is None:
             self.hidden_size = self.encoder_config.hidden_size
         else:
@@ -83,6 +104,11 @@ class GLiClassModelConfig(PretrainedConfig):
             self.text_token_index = self.vocab_size+1
         else:
             self.text_token_index = text_token_index
+
+        if audio_token_index == -1:
+            self.audio_token_index = self.vocab_size + 2
+        else:
+            self.audio_token_index = audio_token_index
 
         self.ignore_index = ignore_index
         self.projector_hidden_act = projector_hidden_act
