@@ -69,13 +69,11 @@ class GLiClassModelConfig(PretrainedConfig):
 
         if audio_model_name is not None:
             if isinstance(audio_model_config, dict):
-                print("Entering audio isinstance")
                 audio_model_config["model_type"] = (audio_model_config["model_type"] 
                                                     if "model_type" in audio_model_config 
                                                     else "wav2vec2")
                 audio_model_config = CONFIG_MAPPING[audio_model_config["model_type"]](**audio_model_config)
             elif audio_model_config is None:
-                print("Entering audio elif")
                 audio_model_config = CONFIG_MAPPING["wav2vec2"]()
 
             self.audio_model_config = audio_model_config
