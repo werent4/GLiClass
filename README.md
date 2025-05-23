@@ -88,6 +88,7 @@ for predict in results:
 ```
 
 ### 🔊 Audio Classification
+**NOTE** This architecture is under active development!
 ```python
 glicalss_config = GLiClassModelConfig.from_pretrained("models_sampled/checkpoint-24/config.json") 
 model = GLiClassModel(glicalss_config)
