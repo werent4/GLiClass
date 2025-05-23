@@ -136,7 +136,7 @@ class GLiClassDataset(Dataset):
         tokenized_inputs = self.tokenize(input_text)
         tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
         tokenized_inputs['labels_text'] =  example['all_labels']
-        tokenized_inputs['input_audio'] = example['audio']
+        tokenized_inputs['audio_input'] = example['audio']
         return tokenized_inputs
 
     def __len__(self):

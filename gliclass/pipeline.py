@@ -1,4 +1,5 @@
 import torch
+import torchaudio
 from tqdm import tqdm
 from typing import List, Dict, Union
 from transformers import AutoTokenizer
@@ -259,9 +260,122 @@ class BiEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline
             tokenized_inputs["labels_mask"] = torch.tensor(labels_mask).to(self.device)
         return tokenized_inputs
 
+class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline):
+    def __init__(self, model, tokenizer, audio_tokenizer, max_classes=25, max_length=1024, max_length_audio_s=5, 
+                 classification_type='multi-label', device='cuda:0', progress_bar=True, sample_rate=16000):
+        super().__init__(model, tokenizer, max_classes, max_length, classification_type, device, progress_bar)
+        self.sample_rate = sample_rate
+        self.audio_tokenizer = audio_tokenizer
+        self.max_length_audio = max_length_audio_s * 16000
+
+    def prepare_input(self, labels):
+        input_text = []
+        for label in labels:
+            label_tag = f"<<LABEL>>{label.lower()}"
+            input_text.append(label_tag)
+        input_text.append('<<SEP>>')
+        if self.model.config.prompt_first:
+            input_text = ''.join(input_text)+'<<AUDIO>>'
+        else:
+            input_text = '<<AUDIO>>'+''.join(input_text)
+        return input_text
+    
+    def process_audio_file(self, audio_path):
+        audio_raw, sample_rate = torchaudio.load(audio_path)
+        if audio_raw.shape[0] > 1:
+            raise ValueError(f"Audio file {audio_path} has more than one channel.")
+
+        if sample_rate != self.sample_rate:
+            print(f"Resampling {audio_path} from {sample_rate} to {self.sample_rate}")
+            audio_raw = torchaudio.transforms.Resample(
+                orig_freq=sample_rate, new_freq=self.sample_rate
+            )(audio_raw)
+
+        if audio_raw.shape[1] > self.max_length_audio:
+            audio_raw = audio_raw[:, :self.max_length_audio]
+        elif audio_raw.shape[1] < self.max_length_audio:
+            audio_raw = torch.nn.functional.pad(audio_raw, (0, self.max_length_audio - audio_raw.shape[1]), mode='constant', value=0)
+
+        features = self.audio_tokenizer(audio_raw, sampling_rate=self.sample_rate, return_tensors="pt")['input_values'].squeeze(0)
+        return features
+
+    def prepare_inputs(self, audio_paths, labels, same_labels=False):
+        text_inputs = []
+        if same_labels:
+            for i in range(len(audio_paths)):
+                text_inputs.append(self.prepare_input(labels[i]))
+        else:
+            for _ in range(len(audio_paths)):
+                text_inputs.append(self.prepare_input(labels))
+
+
+        audio_features = []
+        for path in audio_paths:
+            audio_features.append(self.process_audio_file(path))
+
+        inpts = self.tokenizer(text_inputs, truncation=True, 
+                                    max_length=self.max_length, 
+                                    padding="longest", return_tensors="pt").to(self.device)
+        batch_inputs = {
+            'input_ids': inpts['input_ids'],
+            'attention_mask': inpts['attention_mask'],
+            'audio_input': torch.cat(audio_features, dim=0).to(self.device)
+        }
+        
+        return batch_inputs
+
+    @torch.no_grad()
+    def __call__(self, audio_paths, labels, threshold=0.5, batch_size=8, rac_examples=None):
+        if isinstance(audio_paths, str):
+            audio_paths = [audio_paths]
+        
+        results = []
+        for idx in range(0, len(audio_paths), batch_size):
+            batch_audio_paths = audio_paths[idx:idx+batch_size]
+            
+            if isinstance(labels[0], list):
+                batch_labels = labels[idx:idx+batch_size]
+            else:
+                batch_labels = labels
+
+            tokenized_inputs = self.prepare_inputs(batch_audio_paths, batch_labels, same_labels=True)
+            
+            model_output = self.model(**tokenized_inputs)
+            logits = model_output.logits  
+            
+            if self.classification_type == 'single-label':
+                for i in range(len(batch_audio_paths)):
+                    current_labels = batch_labels[i] if isinstance(batch_labels[0], list) else batch_labels
+                    
+                    score = torch.softmax(logits[i], dim=-1)
+                    pred_idx = torch.argmax(score).item()
+                    
+                    if pred_idx < len(current_labels):
+                        pred_label = current_labels[pred_idx]
+                    else:
+                        pred_label = current_labels[0]
+                        
+                    results.append([{'label': pred_label, 'score': score.max().item()}])
+                    
+            elif self.classification_type == 'multi-label':
+                sigmoid = torch.nn.Sigmoid()
+                probs = sigmoid(logits)
+                
+                for i in range(len(batch_audio_paths)):
+                    current_labels = batch_labels[i] if isinstance(batch_labels[0], list) else batch_labels
+                    
+                    text_results = []
+                    for j, prob in enumerate(probs[i][:len(current_labels)]):
+                        score = prob.item()
+                        if score >= threshold:
+                            text_results.append({'label': current_labels[j], 'score': score})
+                    results.append(text_results)
+        
+        return results
+
 class ZeroShotClassificationPipeline:
     def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0', progress_bar=True):
+                                classification_type='multi-label', device='cuda:0', progress_bar=True, *args, **kwargs):
         if isinstance(model, str):
             model = GLiClassBiEncoder.from_pretrained(model)
         if model.config.architecture_type == 'uni-encoder':
@@ -273,6 +387,8 @@ class ZeroShotClassificationPipeline:
         elif model.config.architecture_type in {'bi-encoder', 'bi-encoder-fused'}:
             self.pipe = BiEncoderZeroShotClassificationPipeline(model, tokenizer, max_classes, 
                                                                     max_length, classification_type, device, progress_bar)
+        elif model.config.architecture_type in {'audio-encoder'}:
+            self.pipe = AudioEncoderZeroShotClassificationPipeline(model, tokenizer, *args, **kwargs)
         else:
             raise NotImplementedError("This artchitecture is not implemented")
     
@@ -280,8 +396,8 @@ class ZeroShotClassificationPipeline:
         results = self.pipe.get_embeddings(*args, **kwargs)
         return results
     
-    def __call__(self, texts, labels, threshold = 0.5, batch_size=8, rac_examples=None):
-        results = self.pipe(texts, labels, threshold = threshold, batch_size=batch_size, rac_examples=rac_examples)
+    def __call__(self, *args, **kwargs):
+        results = self.pipe(*args, **kwargs)
         return results
     
 class ZeroShotClassificationWithLabelsChunkingPipeline(BaseZeroShotClassificationPipeline):

@@ -651,15 +651,11 @@ class GLiClassAudio(GLiClassBaseModel):
         return audio_embeddings
     
     def encode_audio(self, input_values):
-        outputs = self.audio_encoder(input_values.squeeze(0))
+        outputs = self.audio_encoder(input_values)#.squeeze(0))
         audio_embeddings = self.pool_outputs(outputs)
         return audio_embeddings
     
-    def forward(self, input_ids, attention_mask, audio_input, labels=None, **kwargs):
-        audio_embeddings = self.encode_audio(audio_input)  # [batch, hidden]
-        embedding_layer = self.encoder_model.get_input_embeddings()
-        inputs_embeds = embedding_layer(input_ids)
-
+    def insert_audio_embeddings(self, inputs_embeds, input_ids, audio_embeddings):
         audio_token_id = self.config.audio_token_index
         audio_mask = input_ids == audio_token_id
 
@@ -667,6 +663,15 @@ class GLiClassAudio(GLiClassBaseModel):
             audio_positions = torch.where(audio_mask[batch_idx])[0]
             if len(audio_positions) > 0:
                 inputs_embeds[batch_idx, audio_positions[0]] = audio_embeddings[batch_idx]
+        return inputs_embeds
+
+    def forward(self, input_ids, attention_mask, audio_input, labels=None, **kwargs):
+        audio_embeddings = self.encode_audio(audio_input)  # [batch, hidden]
+
+        embedding_layer = self.encoder_model.get_input_embeddings()
+        inputs_embeds = embedding_layer(input_ids)
+
+        inputs_embeds = self.insert_audio_embeddings(inputs_embeds, input_ids, audio_embeddings)
 
         outputs = self.encoder_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
         classes_embedding, classes_embedding_mask, audio_final_emb, audio_mask = self._extract_class_features(outputs[0], input_ids, attention_mask)
@@ -723,7 +728,7 @@ class GLiClassModel(GLiClassPreTrainedModel):
             raise NotImplementedError('Getting input embeddings is not implemented for bi-encoder architecture')
         
     def set_input_embeddings(self, value):
-        if self.config.architecture_type in {'uni-encoder'}:
+        if self.config.architecture_type in {'uni-encoder', 'audio-encoder'}:
             self.model.encoder_model.set_input_embeddings(value)
             return None
         elif self.config.architecture_type == 'encoder-decoder':
@@ -734,21 +739,21 @@ class GLiClassModel(GLiClassPreTrainedModel):
             raise NotImplementedError('Setting input embeddings is not implemented for bi-encoder architecture')
         
     def tie_weights(self):
-        if self.config.architecture_type in {'uni-encoder'}:
+        if self.config.architecture_type in {'uni-encoder', 'audio-encoder'}:
             return self.model.encoder_model.tie_weights()
         elif self.config.architecture_type == 'encoder-decoder':
             return self.model.encoder_decoder_model.tie_weights()
-        elif self.config.architecture_type in {'bi-encoder', 'bi-encoder-fused', 'audio-encoder'}:
+        elif self.config.architecture_type in {'bi-encoder', 'bi-encoder-fused'}:
             return self.model.encoder_model.tie_weights()
         else:
             raise NotImplementedError('Tie weights is not implemented for bi-encoder architecture')
 
     def resize_token_embeddings(self, new_num_tokens: Optional[int] = None, pad_to_multiple_of=None) -> nn.Embedding:
-        if self.config.architecture_type in {'uni-encoder'}:
+        if self.config.architecture_type in {'uni-encoder', 'audio-encoder'}:
             model_embeds = self.model.encoder_model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
         elif self.config.architecture_type == 'encoder-decoder':
             model_embeds = self.model.encoder_decoder_model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
-        elif self.config.architecture_type in {'bi-encoder-fused', 'audio-encoder'}:
+        elif self.config.architecture_type in {'bi-encoder-fused'}:
             model_embeds = self.model.encoder_model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
         else:
             raise NotImplementedError('Resizing is not implemented for bi-encoder architecture')
