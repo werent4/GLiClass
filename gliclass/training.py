@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -49,12 +49,12 @@ class Trainer(transformers.Trainer):
         model.train()
         try:
             if "labels_text" in inputs:
-                labels_text = inputs.pop("labels_text")
+                inputs.pop("labels_text")
             if "input_texts" in inputs:
-                input_texts = inputs.pop("input_texts")
+                inputs.pop("input_texts")
             inputs = self._prepare_inputs(inputs)
             if is_sagemaker_mp_enabled():
-                loss_mb = smp_forward_backward(
+                loss_mb = smp_forward_backward(  # noqa: F821
                     model, inputs, self.args.gradient_accumulation_steps
                 )
                 return loss_mb.reduce_mean().detach().to(self.args.device)
@@ -75,7 +75,7 @@ class Trainer(transformers.Trainer):
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
             if self.use_apex:
-                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:  # noqa: F821
                     scaled_loss.backward()
             else:
                 self.accelerator.backward(loss, **kwargs)
@@ -116,15 +116,17 @@ class Trainer(transformers.Trainer):
         try:
             with torch.no_grad():
                 if "labels_text" in inputs:
-                    labels_text = inputs.pop("labels_text")
+                    inputs.pop("labels_text")
                 if "input_texts" in inputs:
-                    input_texts = inputs.pop("input_texts")
+                    inputs.pop("input_texts")
                 loss = None
                 with self.compute_loss_context_manager():
                     try:
                         outputs = model(**inputs)
                     except Exception as e:
-                        raise RuntimeError(f"Error during model forward pass: {str(e)}") from e
+                        raise RuntimeError(
+                            f"Error during model forward pass: {str(e)}"
+                        ) from e
 
                 if not hasattr(outputs, "loss"):
                     raise AttributeError(
@@ -352,10 +354,7 @@ class RLTrainer(Trainer):
             elif isinstance(self.reference_model, TransformersClassificationPipeline):
                 for text, labels in zip(input_texts, labels_text):
                     result = self.reference_model(text, labels)
-                    label2score = {
-                        label: score
-                        for label, score in zip(result["labels"], result["scores"])
-                    }
+                    label2score = dict(zip(result["labels"], result["scores"]))
                     label_scores = [label2score[label] for label in labels_text[id]]
                     all_scores.append(label_scores)
             else:
@@ -506,7 +505,7 @@ class RLTrainer(Trainer):
                 else:
                     input_texts = None
                 prev_logps = None
-                for iter in range(args.num_rl_iters):
+                for _ in range(args.num_rl_iters):
                     try:
                         outputs = model(**inputs)
                         logits = outputs.logits

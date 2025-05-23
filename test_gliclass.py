@@ -73,7 +73,7 @@ class TestModel:
         true_labels = test_dataset[label_column]
         print(true_labels[:5])
         print(classes)
-        if type(test_dataset[label_column][0]) == int:
+        if isinstance(test_dataset[label_column][0], int):
             true_labels = [classes[label] for label in true_labels]
         return texts, classes, true_labels
 
@@ -103,7 +103,7 @@ class TestModel:
         true_labels = test_dataset[label_column]
         # if isinstance(test_dataset.features[label_column], ClassLabel):
         #     true_labels = [test_dataset.features[label_column].int2str(label) for label in true_labels]
-        if type(true_labels[0]) == int:
+        if isinstance(true_labels[0], int):
             true_labels = [classes[label] for label in true_labels]
 
         return texts, classes, true_labels
