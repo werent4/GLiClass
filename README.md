@@ -87,6 +87,24 @@ for predict in results:
     print(f"{predict['label']} => {predict['score']:.3f}")
 ```
 
+### 🔊 Audio Classification
+```python
+glicalss_config = GLiClassModelConfig.from_pretrained("models_sampled/checkpoint-24/config.json") 
+model = GLiClassModel(glicalss_config)
+tokenizer = AutoTokenizer.from_pretrained("models_sampled/checkpoint-24")
+audio_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
+    glicalss_config.audio_model_config._name_or_path,
+)
+audio_path = "audio.wav"
+labels = ["happy", "sad", "angry"]
+pipline = ZeroShotClassificationPipeline(
+    model, tokenizer,audio_tokenizer=audio_feature_extractor,
+)
+results = pipline(audio_path, labels, threshold=0)[0]
+for predict in results:
+    print(f"{predict['label']} => {predict['score']:.3f}")
+```
+
 ### 🎯 Key Use Cases
 
 - **Sentiment Analysis:** Rapidly classify texts as positive, negative, or neutral.
