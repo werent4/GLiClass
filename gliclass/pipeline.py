@@ -302,11 +302,11 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
     def prepare_inputs(self, audio_paths, labels, same_labels=False):
         text_inputs = []
         if same_labels:
-            for i in range(len(audio_paths)):
-                text_inputs.append(self.prepare_input(labels[i]))
-        else:
             for _ in range(len(audio_paths)):
                 text_inputs.append(self.prepare_input(labels))
+        else:
+            for i in range(len(audio_paths)):
+                text_inputs.append(self.prepare_input(labels[i]))
 
 
         audio_features = []
@@ -328,35 +328,35 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
     def __call__(self, audio_paths, labels, threshold=0.5, batch_size=8, rac_examples=None):
         if isinstance(audio_paths, str):
             audio_paths = [audio_paths]
-        
+
+        if isinstance(labels[0], str):
+            same_labels = True
+        else:
+            same_labels = False
+
         results = []
         for idx in range(0, len(audio_paths), batch_size):
             batch_audio_paths = audio_paths[idx:idx+batch_size]
-            
-            if isinstance(labels[0], list):
+
+            if not same_labels:
                 batch_labels = labels[idx:idx+batch_size]
             else:
                 batch_labels = labels
 
-            tokenized_inputs = self.prepare_inputs(batch_audio_paths, batch_labels, same_labels=True)
+            tokenized_inputs = self.prepare_inputs(batch_audio_paths, batch_labels, same_labels=same_labels)
             
             model_output = self.model(**tokenized_inputs)
             logits = model_output.logits  
             
             if self.classification_type == 'single-label':
                 for i in range(len(batch_audio_paths)):
-                    current_labels = batch_labels[i] if isinstance(batch_labels[0], list) else batch_labels
-                    
                     score = torch.softmax(logits[i], dim=-1)
-                    pred_idx = torch.argmax(score).item()
-                    
-                    if pred_idx < len(current_labels):
-                        pred_label = current_labels[pred_idx]
+                    if same_labels:
+                        curr_labels = batch_labels
                     else:
-                        pred_label = current_labels[0]
-                        
+                        curr_labels = batch_labels[i]
+                    pred_label = curr_labels[torch.argmax(score).item()]
                     results.append([{'label': pred_label, 'score': score.max().item()}])
-                    
             elif self.classification_type == 'multi-label':
                 sigmoid = torch.nn.Sigmoid()
                 probs = sigmoid(logits)
@@ -375,7 +375,7 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
 
 class ZeroShotClassificationPipeline:
     def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0', progress_bar=True, *args, **kwargs):
+                                classification_type='multi-label', device='cuda:0', progress_bar=True, audio_tokenizer=None, max_length_audio_s=5, sample_rate=16000):
         if isinstance(model, str):
             model = GLiClassBiEncoder.from_pretrained(model)
         if model.config.architecture_type == 'uni-encoder':
@@ -388,7 +388,9 @@ class ZeroShotClassificationPipeline:
             self.pipe = BiEncoderZeroShotClassificationPipeline(model, tokenizer, max_classes, 
                                                                     max_length, classification_type, device, progress_bar)
         elif model.config.architecture_type in {'audio-encoder'}:
-            self.pipe = AudioEncoderZeroShotClassificationPipeline(model, tokenizer, *args, **kwargs)
+            self.pipe = AudioEncoderZeroShotClassificationPipeline(model, tokenizer, audio_tokenizer, max_classes,
+                                                                   max_length=max_length, max_length_audio_s=max_length_audio_s,
+                                                                   classification_type=classification_type, device=device, progress_bar=progress_bar, sample_rate=sample_rate)
         else:
             raise NotImplementedError("This artchitecture is not implemented")
     
