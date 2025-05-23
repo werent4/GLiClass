@@ -25,6 +25,8 @@ def extract_and_save_features(example, audio_dir):
     max_length = 16000 * 5
     if len(audio_array) > max_length:
         audio_array = audio_array[:max_length]
+    elif len(audio_array) < max_length:
+        audio_array = np.pad(audio_array, (0, max_length - len(audio_array)), mode='constant')
     
     inputs = audio_feature_extractor(
         audio_array, 
@@ -95,10 +97,12 @@ def main(args):
             
             label = id2label[example['label']] if example['label'] in id2label else "unknown"
             
+            all_labels = list(id2label.values())
+            random.shuffle(all_labels) # Dont forget to shuffle the labels, to help the model to better generalize
             row = {
                 "id": idx,
                 "audio_features_path": audio_path,
-                "all_labels": list(id2label.values()),
+                "all_labels": all_labels,
                 "true_labels": [label],
             }
             
