@@ -95,7 +95,7 @@ for predict in results:
 - **News Categorization:** Automatically tag and organize news articles into predefined categories.
 - **Fact Checking:** Quickly validate and categorize statements based on factual accuracy.
 
-### 🛠️ How to Train
+### 🛠️ How to Train GLiClass
 
 Prepare your training data as follows:
 
@@ -116,3 +116,13 @@ Optionally, specify confidence scores explicitly:
 ```
 
 Please, refer to the `train.py` script to set up your training from scratch or fine-tune existing models.
+
+### 🛠️ How to Train GLiClassAudio
+```json
+[
+  {"audio_features_path": "path/to/already/processed/file", "all_labels": ["sports", "science", "business"], "true_labels": ["sports"]},
+  ...
+]
+```
+
+Please, refer to the `audiodataset_gliclass.py` and `train_gliclass_audio.py` scripts to set up your training from scratch or fine-tune existing models.

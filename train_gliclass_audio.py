@@ -8,6 +8,7 @@ from sklearn.metrics import precision_recall_fscore_support, accuracy_score
 from transformers import AutoTokenizer, AutoConfig
 
 import random
+random.seed(42)
 import torch
 
 from gliclass import GLiClassModelConfig, GLiClassModel
@@ -141,6 +142,20 @@ def main(args):
     )
     trainer.train()
 
+    eval_results = trainer.evaluate()
+    
+    results_to_save = {
+        "args": vars(args),
+        "eval_metrics": eval_results
+    }
+    
+    metrics_output_path = os.path.join(args.save_path, "training_results.json")
+    os.makedirs(os.path.dirname(metrics_output_path), exist_ok=True)
+    
+    with open(metrics_output_path, "w") as f:
+        json.dump(results_to_save, f, indent=4)
+    
+    print(f"Training metrics and arguments saved to {metrics_output_path}")
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, default= None)
@@ -158,10 +173,10 @@ if __name__ == '__main__':
     parser.add_argument('--use_lstm', type=bool, default=False)
     parser.add_argument('--squeeze_layers', type=bool, default=False)
     parser.add_argument('--shuffle_labels', type=bool, default=True)
-    parser.add_argument('--num_epochs', type=int, default=3)
+    parser.add_argument('--num_epochs', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--encoder_lr', type=float, default=1e-5)
-    parser.add_argument('--others_lr', type=float, default=3e-5)
+    parser.add_argument('--encoder_lr', type=float, default=1e-6)
+    parser.add_argument('--others_lr', type=float, default=1e-5)
     parser.add_argument('--encoder_weight_decay', type=float, default=0.01)
     parser.add_argument('--others_weight_decay', type=float, default=0.01)
     parser.add_argument('--warmup_ratio', type=float, default=0.05)
