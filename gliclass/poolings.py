@@ -28,9 +28,7 @@ class LastTokenPooling1D(nn.Module):
 class GlobalAvgPooling1D(nn.Module):
     """Applies Global Average Pooling on the timesteps dimension."""
 
-    def forward(
-        self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
-    ):
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         if attention_mask is not None:
             attention_mask = attention_mask.repeat((1, 1, x.shape[-1])).to(
                 dtype=x.dtype
@@ -89,13 +87,14 @@ class GlobalAbsAvgPooling1D(nn.Module):
         else:
             return x.abs().mean(dim=1)
 
+
 POOLING2OBJECT = {
-    'max': GlobalMaxPooling1D,
-    'first': FirstTokenPooling1D,
-    'last': LastTokenPooling1D,
-    'avg': GlobalAvgPooling1D,
-    'sum': GlobalSumPooling1D,
-    'rms': GlobalRMSPooling1D,
-    'abs_max': GlobalAbsMaxPooling1D,
-    'abs_avg': GlobalAbsAvgPooling1D
+    "max": GlobalMaxPooling1D,
+    "first": FirstTokenPooling1D,
+    "last": LastTokenPooling1D,
+    "avg": GlobalAvgPooling1D,
+    "sum": GlobalSumPooling1D,
+    "rms": GlobalRMSPooling1D,
+    "abs_max": GlobalAbsMaxPooling1D,
+    "abs_avg": GlobalAbsAvgPooling1D,
 }

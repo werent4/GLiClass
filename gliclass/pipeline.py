@@ -1,15 +1,26 @@
+from abc import ABC, abstractmethod
+from typing import Dict, List, Union
+
 import torch
 import torchaudio
 from tqdm import tqdm
-from typing import List, Dict, Union
 from transformers import AutoTokenizer
-from abc import ABC, abstractmethod
-from .model import GLiClassModel, GLiClassBiEncoder
+
+from .model import GLiClassBiEncoder, GLiClassModel
 from .utils import retrieval_augmented_text
 
+
 class BaseZeroShotClassificationPipeline(ABC):
-    def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0', progress_bar=True):
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        max_classes=25,
+        max_length=1024,
+        classification_type="multi-label",
+        device="cuda:0",
+        progress_bar=True,
+    ):
         self.model = model
         if isinstance(tokenizer, str):
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
@@ -21,10 +32,10 @@ class BaseZeroShotClassificationPipeline(ABC):
         self.progress_bar = progress_bar
 
         if not isinstance(device, torch.device):
-            if torch.cuda.is_available() and 'cuda' in device:
+            if torch.cuda.is_available() and "cuda" in device:
                 self.device = torch.device(device)
             else:
-                self.device = torch.device('cpu')
+                self.device = torch.device("cpu")
         else:
             self.device = device
 
@@ -32,9 +43,9 @@ class BaseZeroShotClassificationPipeline(ABC):
             self.model.to(self.device)
 
     @abstractmethod
-    def prepare_inputs(self, texts, labels, same_labels = False):
+    def prepare_inputs(self, texts, labels, same_labels=False):
         pass
-    
+
     @torch.no_grad()
     def get_embeddings(self, texts, labels, batch_size=8):
         if isinstance(texts, str):
@@ -43,7 +54,7 @@ class BaseZeroShotClassificationPipeline(ABC):
             same_labels = True
         else:
             same_labels = False
-        
+
         results = []
 
         iterable = range(0, len(texts), batch_size)
@@ -51,54 +62,62 @@ class BaseZeroShotClassificationPipeline(ABC):
             iterable = tqdm(iterable)
 
         for idx in iterable:
-            batch_texts = texts[idx:idx+batch_size]
+            batch_texts = texts[idx : idx + batch_size]
             tokenized_inputs = self.prepare_inputs(batch_texts, labels, same_labels)
-            model_output = self.model(**tokenized_inputs, output_text_embeddings=True,
-                                    output_class_embeddings=True)
+            model_output = self.model(
+                **tokenized_inputs,
+                output_text_embeddings=True,
+                output_class_embeddings=True,
+            )
             logits = model_output.logits
             text_embeddings = model_output.text_embeddings
             class_embeddings = model_output.class_embeddings
             batch_size = logits.shape[0]
-            
+
             for i in range(batch_size):
                 result = {
-                    'logits': logits[i].cpu().numpy(),
-                    'text_embedding': text_embeddings[i].cpu().numpy(),
-                    'class_embeddings': class_embeddings[i].cpu().numpy()
+                    "logits": logits[i].cpu().numpy(),
+                    "text_embedding": text_embeddings[i].cpu().numpy(),
+                    "class_embeddings": class_embeddings[i].cpu().numpy(),
                 }
                 results.append(result)
-        
+
         return results
 
     @torch.no_grad()
-    def __call__(self, texts, labels, threshold = 0.5, batch_size=8, rac_examples=None):
+    def __call__(self, texts, labels, threshold=0.5, batch_size=8, rac_examples=None):
         if isinstance(texts, str):
             if rac_examples:
                 texts = retrieval_augmented_text(texts, rac_examples)
             texts = [texts]
         else:
             if rac_examples:
-                texts = [retrieval_augmented_text(text, examples) for text, examples in zip(texts, rac_examples)]
+                texts = [
+                    retrieval_augmented_text(text, examples)
+                    for text, examples in zip(texts, rac_examples)
+                ]
         if isinstance(labels[0], str):
             same_labels = True
         else:
             same_labels = False
-            
+
         results = []
         iterable = range(0, len(texts), batch_size)
         if self.progress_bar:
             iterable = tqdm(iterable)
 
         for idx in iterable:
-            batch_texts = texts[idx:idx+batch_size]
+            batch_texts = texts[idx : idx + batch_size]
             if not same_labels:
-                batch_labels = labels[idx:idx+batch_size]
+                batch_labels = labels[idx : idx + batch_size]
             else:
                 batch_labels = labels
-            tokenized_inputs = self.prepare_inputs(batch_texts, batch_labels, same_labels)
+            tokenized_inputs = self.prepare_inputs(
+                batch_texts, batch_labels, same_labels
+            )
             model_output = self.model(**tokenized_inputs)
             logits = model_output.logits
-            if self.classification_type == 'single-label':
+            if self.classification_type == "single-label":
                 for i in range(len(batch_texts)):
                     score = torch.softmax(logits[i], dim=-1)
                     if same_labels:
@@ -106,8 +125,8 @@ class BaseZeroShotClassificationPipeline(ABC):
                     else:
                         curr_labels = batch_labels[i]
                     pred_label = curr_labels[torch.argmax(score).item()]
-                    results.append([{'label': pred_label, 'score': score.max().item()}])
-            elif self.classification_type == 'multi-label':
+                    results.append([{"label": pred_label, "score": score.max().item()}])
+            elif self.classification_type == "multi-label":
                 sigmoid = torch.nn.Sigmoid()
                 probs = sigmoid(logits)
                 for i in range(len(batch_texts)):
@@ -116,103 +135,173 @@ class BaseZeroShotClassificationPipeline(ABC):
                         curr_labels = batch_labels
                     else:
                         curr_labels = batch_labels[i]
-                    for j, prob in enumerate(probs[i][:len(curr_labels)]):
+                    for j, prob in enumerate(probs[i][: len(curr_labels)]):
                         score = prob.item()
-                        if score>=threshold and len(curr_labels):
-                            text_results.append({'label': curr_labels[j], 'score': score})
+                        if score >= threshold and len(curr_labels):
+                            text_results.append(
+                                {"label": curr_labels[j], "score": score}
+                            )
                     results.append(text_results)
             else:
-                raise ValueError("Unsupported classification type: choose 'single-label' or 'multi-label'")
+                raise ValueError(
+                    "Unsupported classification type: choose 'single-label' or 'multi-label'"
+                )
         return results
-    
+
+
 class UniEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline):
-    def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0', progress_bar=True):
-        super().__init__(model, tokenizer, max_classes, max_length, classification_type, device, progress_bar)
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        max_classes=25,
+        max_length=1024,
+        classification_type="multi-label",
+        device="cuda:0",
+        progress_bar=True,
+    ):
+        super().__init__(
+            model,
+            tokenizer,
+            max_classes,
+            max_length,
+            classification_type,
+            device,
+            progress_bar,
+        )
 
     def prepare_input(self, text, labels):
         input_text = []
         for label in labels:
             label_tag = f"<<LABEL>>{label.lower()}"
             input_text.append(label_tag)
-        input_text.append('<<SEP>>')
+        input_text.append("<<SEP>>")
         if self.model.config.prompt_first:
-            input_text = ''.join(input_text)+text
+            input_text = "".join(input_text) + text
         else:
-            input_text = text+''.join(input_text)
+            input_text = text + "".join(input_text)
         return input_text
 
-    def prepare_inputs(self, texts, labels, same_labels = False):
+    def prepare_inputs(self, texts, labels, same_labels=False):
         inputs = []
-        
+
         if same_labels:
             for text in texts:
                 inputs.append(self.prepare_input(text, labels))
         else:
             for text, labels_ in zip(texts, labels):
                 inputs.append(self.prepare_input(text, labels_))
-        
-        tokenized_inputs = self.tokenizer(inputs, truncation=True, 
-                                            max_length=self.max_length, 
-                                                    padding="longest", return_tensors="pt").to(self.device)
+
+        tokenized_inputs = self.tokenizer(
+            inputs,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        ).to(self.device)
 
         return tokenized_inputs
 
+
 class EncoderDecoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline):
-    def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0', progress_bar=True):
-        super().__init__(model, tokenizer, max_classes, max_length, classification_type, device, progress_bar)
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        max_classes=25,
+        max_length=1024,
+        classification_type="multi-label",
+        device="cuda:0",
+        progress_bar=True,
+    ):
+        super().__init__(
+            model,
+            tokenizer,
+            max_classes,
+            max_length,
+            classification_type,
+            device,
+            progress_bar,
+        )
 
     def prepare_labels_prompt(self, labels):
         input_text = []
         for label in labels:
             label_tag = f"<<LABEL>>{label.lower()}"
             input_text.append(label_tag)
-        input_text.append('<<SEP>>')
-        input_text = ''.join(input_text)
+        input_text.append("<<SEP>>")
+        input_text = "".join(input_text)
         return input_text
 
-    def prepare_inputs(self, texts, labels, same_labels = False):
+    def prepare_inputs(self, texts, labels, same_labels=False):
         prompts = []
-        
+
         if same_labels:
             for _ in texts:
                 prompts.append(self.prepare_labels_prompt(labels))
         else:
             for labels_ in labels:
                 prompts.append(self.prepare_labels_prompt(labels_))
-        
-        tokenized_inputs = self.tokenizer(texts, truncation=True, 
-                                            max_length=self.max_length, 
-                                                    padding="longest", return_tensors="pt").to(self.device)
-        
-        tokenized_classes = self.tokenizer(prompts, max_length=self.max_length, 
-                                        truncation=True, padding="longest", return_tensors='pt').to(self.device)
+
+        tokenized_inputs = self.tokenizer(
+            texts,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        ).to(self.device)
+
+        tokenized_classes = self.tokenizer(
+            prompts,
+            max_length=self.max_length,
+            truncation=True,
+            padding="longest",
+            return_tensors="pt",
+        ).to(self.device)
         tokenized_inputs["class_input_ids"] = tokenized_classes["input_ids"]
         tokenized_inputs["class_attention_mask"] = tokenized_classes["attention_mask"]
 
         return tokenized_inputs
-    
+
+
 class BiEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline):
-    def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0', progress_bar=True):
-        super().__init__(model, tokenizer, max_classes, max_length, classification_type, device, progress_bar)
-        self.labels_tokenizer = AutoTokenizer.from_pretrained(model.config.label_model_name)
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        max_classes=25,
+        max_length=1024,
+        classification_type="multi-label",
+        device="cuda:0",
+        progress_bar=True,
+    ):
+        super().__init__(
+            model,
+            tokenizer,
+            max_classes,
+            max_length,
+            classification_type,
+            device,
+            progress_bar,
+        )
+        self.labels_tokenizer = AutoTokenizer.from_pretrained(
+            model.config.label_model_name
+        )
 
     def prepare_input(self, text, labels):
         input_text = []
         for label in labels:
-            label_tag = f"<<LABEL>>"
+            label_tag = "<<LABEL>>"
             input_text.append(label_tag)
-        input_text.append('<<SEP>>')
+        input_text.append("<<SEP>>")
         if self.model.config.prompt_first:
-            input_text = ''.join(input_text)+text
+            input_text = "".join(input_text) + text
         else:
-            input_text = text+''.join(input_text)
+            input_text = text + "".join(input_text)
         return input_text
-    
+
     def prepare_inputs(self, texts, labels, same_labels=False):
-        if self.model.config.architecture_type == 'bi-encoder-fused':
+        if self.model.config.architecture_type == "bi-encoder-fused":
             inputs = []
             if same_labels:
                 for text in texts:
@@ -224,46 +313,87 @@ class BiEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline
             inputs = texts
         if same_labels:
             # If all texts use the same labels
-            tokenized_inputs = self.tokenizer(inputs, truncation=True,
-                                            max_length=self.max_length,
-                                            padding="longest", return_tensors="pt").to(self.device)
+            tokenized_inputs = self.tokenizer(
+                inputs,
+                truncation=True,
+                max_length=self.max_length,
+                padding="longest",
+                return_tensors="pt",
+            ).to(self.device)
 
-            tokenized_labels = self.labels_tokenizer(labels, truncation=True,
-                                            max_length=self.max_length,
-                                            padding="longest", return_tensors="pt").to(self.device)
-            tokenized_inputs['class_input_ids'] = tokenized_labels['input_ids'].expand(len(texts), -1, -1)
-            tokenized_inputs['class_attention_mask'] = tokenized_labels['attention_mask'].expand(len(texts), -1, -1)
-            
+            tokenized_labels = self.labels_tokenizer(
+                labels,
+                truncation=True,
+                max_length=self.max_length,
+                padding="longest",
+                return_tensors="pt",
+            ).to(self.device)
+            tokenized_inputs["class_input_ids"] = tokenized_labels["input_ids"].expand(
+                len(texts), -1, -1
+            )
+            tokenized_inputs["class_attention_mask"] = tokenized_labels[
+                "attention_mask"
+            ].expand(len(texts), -1, -1)
+
             labels_mask = [[1 for i in range(len(labels))] for j in range(len(texts))]
             tokenized_inputs["labels_mask"] = torch.tensor(labels_mask).to(self.device)
         else:
             # If each text has its own set of labels
-            tokenized_inputs = self.tokenizer(inputs, truncation=True,
-                                            max_length=self.max_length,
-                                            padding="longest", return_tensors="pt").to(self.device)
-            
+            tokenized_inputs = self.tokenizer(
+                inputs,
+                truncation=True,
+                max_length=self.max_length,
+                padding="longest",
+                return_tensors="pt",
+            ).to(self.device)
+
             class_input_ids = []
             class_attention_mask = []
-            
+
             for labels_set in labels:
-                tokenized_labels = self.labels_tokenizer(labels_set, truncation=True,
-                                                max_length=self.max_length,
-                                                padding="max_length",
-                                                return_tensors="pt").to(self.device)
+                tokenized_labels = self.labels_tokenizer(
+                    labels_set,
+                    truncation=True,
+                    max_length=self.max_length,
+                    padding="max_length",
+                    return_tensors="pt",
+                ).to(self.device)
                 class_input_ids.append(tokenized_labels["input_ids"])
                 class_attention_mask.append(tokenized_labels["attention_mask"])
-            
+
             tokenized_inputs["class_input_ids"] = torch.stack(class_input_ids)
             tokenized_inputs["class_attention_mask"] = torch.stack(class_attention_mask)
 
-            labels_mask = [[1 for i in range(len(labels[j]))] for j in range(len(texts))]
+            labels_mask = [
+                [1 for i in range(len(labels[j]))] for j in range(len(texts))
+            ]
             tokenized_inputs["labels_mask"] = torch.tensor(labels_mask).to(self.device)
         return tokenized_inputs
 
+
 class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline):
-    def __init__(self, model, tokenizer, audio_tokenizer, max_classes=25, max_length=1024, max_length_audio_s=5, 
-                 classification_type='multi-label', device='cuda:0', progress_bar=True, sample_rate=16000):
-        super().__init__(model, tokenizer, max_classes, max_length, classification_type, device, progress_bar)
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        audio_tokenizer,
+        max_classes=25,
+        max_length=1024,
+        max_length_audio_s=5,
+        classification_type="multi-label",
+        device="cuda:0",
+        progress_bar=True,
+        sample_rate=16000,
+    ):
+        super().__init__(
+            model,
+            tokenizer,
+            max_classes,
+            max_length,
+            classification_type,
+            device,
+            progress_bar,
+        )
         self.sample_rate = sample_rate
         self.audio_tokenizer = audio_tokenizer
         self.max_length_audio = max_length_audio_s * 16000
@@ -273,13 +403,13 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
         for label in labels:
             label_tag = f"<<LABEL>>{label.lower()}"
             input_text.append(label_tag)
-        input_text.append('<<SEP>>')
+        input_text.append("<<SEP>>")
         if self.model.config.prompt_first:
-            input_text = ''.join(input_text)+'<<AUDIO>>'
+            input_text = "".join(input_text) + "<<AUDIO>>"
         else:
-            input_text = '<<AUDIO>>'+''.join(input_text)
+            input_text = "<<AUDIO>>" + "".join(input_text)
         return input_text
-    
+
     def process_audio_file(self, audio_path):
         audio_raw, sample_rate = torchaudio.load(audio_path)
         if audio_raw.shape[0] > 1:
@@ -292,11 +422,18 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
             )(audio_raw)
 
         if audio_raw.shape[1] > self.max_length_audio:
-            audio_raw = audio_raw[:, :self.max_length_audio]
+            audio_raw = audio_raw[:, : self.max_length_audio]
         elif audio_raw.shape[1] < self.max_length_audio:
-            audio_raw = torch.nn.functional.pad(audio_raw, (0, self.max_length_audio - audio_raw.shape[1]), mode='constant', value=0)
+            audio_raw = torch.nn.functional.pad(
+                audio_raw,
+                (0, self.max_length_audio - audio_raw.shape[1]),
+                mode="constant",
+                value=0,
+            )
 
-        features = self.audio_tokenizer(audio_raw, sampling_rate=self.sample_rate, return_tensors="pt")['input_values'].squeeze(0)
+        features = self.audio_tokenizer(
+            audio_raw, sampling_rate=self.sample_rate, return_tensors="pt"
+        )["input_values"].squeeze(0)
         return features
 
     def prepare_inputs(self, audio_paths, labels, same_labels=False):
@@ -308,24 +445,29 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
             for i in range(len(audio_paths)):
                 text_inputs.append(self.prepare_input(labels[i]))
 
-
         audio_features = []
         for path in audio_paths:
             audio_features.append(self.process_audio_file(path))
 
-        inpts = self.tokenizer(text_inputs, truncation=True, 
-                                    max_length=self.max_length, 
-                                    padding="longest", return_tensors="pt").to(self.device)
+        inpts = self.tokenizer(
+            text_inputs,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        ).to(self.device)
         batch_inputs = {
-            'input_ids': inpts['input_ids'],
-            'attention_mask': inpts['attention_mask'],
-            'audio_input': torch.cat(audio_features, dim=0).to(self.device)
+            "input_ids": inpts["input_ids"],
+            "attention_mask": inpts["attention_mask"],
+            "audio_input": torch.cat(audio_features, dim=0).to(self.device),
         }
-        
+
         return batch_inputs
 
     @torch.no_grad()
-    def __call__(self, audio_paths, labels, threshold=0.5, batch_size=8, rac_examples=None):
+    def __call__(
+        self, audio_paths, labels, threshold=0.5, batch_size=8, rac_examples=None
+    ):
         if isinstance(audio_paths, str):
             audio_paths = [audio_paths]
 
@@ -336,19 +478,21 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
 
         results = []
         for idx in range(0, len(audio_paths), batch_size):
-            batch_audio_paths = audio_paths[idx:idx+batch_size]
+            batch_audio_paths = audio_paths[idx : idx + batch_size]
 
             if not same_labels:
-                batch_labels = labels[idx:idx+batch_size]
+                batch_labels = labels[idx : idx + batch_size]
             else:
                 batch_labels = labels
 
-            tokenized_inputs = self.prepare_inputs(batch_audio_paths, batch_labels, same_labels=same_labels)
-            
+            tokenized_inputs = self.prepare_inputs(
+                batch_audio_paths, batch_labels, same_labels=same_labels
+            )
+
             model_output = self.model(**tokenized_inputs)
-            logits = model_output.logits  
-            
-            if self.classification_type == 'single-label':
+            logits = model_output.logits
+
+            if self.classification_type == "single-label":
                 for i in range(len(batch_audio_paths)):
                     score = torch.softmax(logits[i], dim=-1)
                     if same_labels:
@@ -356,56 +500,116 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
                     else:
                         curr_labels = batch_labels[i]
                     pred_label = curr_labels[torch.argmax(score).item()]
-                    results.append([{'label': pred_label, 'score': score.max().item()}])
-            elif self.classification_type == 'multi-label':
+                    results.append([{"label": pred_label, "score": score.max().item()}])
+            elif self.classification_type == "multi-label":
                 sigmoid = torch.nn.Sigmoid()
                 probs = sigmoid(logits)
-                
+
                 for i in range(len(batch_audio_paths)):
-                    current_labels = batch_labels[i] if isinstance(batch_labels[0], list) else batch_labels
-                    
+                    current_labels = (
+                        batch_labels[i]
+                        if isinstance(batch_labels[0], list)
+                        else batch_labels
+                    )
+
                     text_results = []
-                    for j, prob in enumerate(probs[i][:len(current_labels)]):
+                    for j, prob in enumerate(probs[i][: len(current_labels)]):
                         score = prob.item()
                         if score >= threshold:
-                            text_results.append({'label': current_labels[j], 'score': score})
+                            text_results.append(
+                                {"label": current_labels[j], "score": score}
+                            )
                     results.append(text_results)
-        
+
         return results
 
+
 class ZeroShotClassificationPipeline:
-    def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0', progress_bar=True, audio_tokenizer=None, max_length_audio_s=5, sample_rate=16000):
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        max_classes=25,
+        max_length=1024,
+        classification_type="multi-label",
+        device="cuda:0",
+        progress_bar=True,
+        audio_tokenizer=None,
+        max_length_audio_s=5,
+        sample_rate=16000,
+    ):
         if isinstance(model, str):
             model = GLiClassBiEncoder.from_pretrained(model)
-        if model.config.architecture_type == 'uni-encoder':
-            self.pipe = UniEncoderZeroShotClassificationPipeline(model, tokenizer, max_classes, 
-                                                                    max_length, classification_type, device, progress_bar)
-        elif model.config.architecture_type in {'encoder-decoder'}:
-            self.pipe = EncoderDecoderZeroShotClassificationPipeline(model, tokenizer, max_classes, 
-                                                                    max_length, classification_type, device, progress_bar)
-        elif model.config.architecture_type in {'bi-encoder', 'bi-encoder-fused'}:
-            self.pipe = BiEncoderZeroShotClassificationPipeline(model, tokenizer, max_classes, 
-                                                                    max_length, classification_type, device, progress_bar)
-        elif model.config.architecture_type in {'audio-encoder'}:
-            self.pipe = AudioEncoderZeroShotClassificationPipeline(model, tokenizer, audio_tokenizer, max_classes,
-                                                                   max_length=max_length, max_length_audio_s=max_length_audio_s,
-                                                                   classification_type=classification_type, device=device, progress_bar=progress_bar, sample_rate=sample_rate)
+        if model.config.architecture_type == "uni-encoder":
+            self.pipe = UniEncoderZeroShotClassificationPipeline(
+                model,
+                tokenizer,
+                max_classes,
+                max_length,
+                classification_type,
+                device,
+                progress_bar,
+            )
+        elif model.config.architecture_type in {"encoder-decoder"}:
+            self.pipe = EncoderDecoderZeroShotClassificationPipeline(
+                model,
+                tokenizer,
+                max_classes,
+                max_length,
+                classification_type,
+                device,
+                progress_bar,
+            )
+        elif model.config.architecture_type in {"bi-encoder", "bi-encoder-fused"}:
+            self.pipe = BiEncoderZeroShotClassificationPipeline(
+                model,
+                tokenizer,
+                max_classes,
+                max_length,
+                classification_type,
+                device,
+                progress_bar,
+            )
+        elif model.config.architecture_type in {"audio-encoder"}:
+            self.pipe = AudioEncoderZeroShotClassificationPipeline(
+                model,
+                tokenizer,
+                audio_tokenizer,
+                max_classes,
+                max_length=max_length,
+                max_length_audio_s=max_length_audio_s,
+                classification_type=classification_type,
+                device=device,
+                progress_bar=progress_bar,
+                sample_rate=sample_rate,
+            )
         else:
             raise NotImplementedError("This artchitecture is not implemented")
-    
+
     def get_embeddings(self, *args, **kwargs):
         results = self.pipe.get_embeddings(*args, **kwargs)
         return results
-    
+
     def __call__(self, *args, **kwargs):
         results = self.pipe(*args, **kwargs)
         return results
-    
-class ZeroShotClassificationWithLabelsChunkingPipeline(BaseZeroShotClassificationPipeline):
-    def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0'):
-        super().__init__(model, tokenizer, max_classes, max_length, classification_type, device)
+
+
+class ZeroShotClassificationWithLabelsChunkingPipeline(
+    BaseZeroShotClassificationPipeline
+):
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        max_classes=25,
+        max_length=1024,
+        classification_type="multi-label",
+        device="cuda:0",
+    ):
+        super().__init__(
+            model, tokenizer, max_classes, max_length, classification_type, device
+        )
         if isinstance(model, str):
             self.model = GLiClassModel.from_pretrained(model)
         else:
@@ -419,23 +623,29 @@ class ZeroShotClassificationWithLabelsChunkingPipeline(BaseZeroShotClassificatio
         for label in labels:
             label_tag = f"<<LABEL>>{label.lower()}"
             input_text.append(label_tag)
-        input_text.append('<<SEP>>')
-        input_text = ''.join(input_text)+text
+        input_text.append("<<SEP>>")
+        input_text = "".join(input_text) + text
         return input_text
 
     def prepare_inputs(self, texts, labels):
         inputs = []
-    
+
         for text in texts:
             inputs.append(self.prepare_input(text, labels))
-        
-        tokenized_inputs = self.tokenizer(inputs, truncation=True, 
-                                            max_length=self.max_length, 
-                                                    padding="longest", return_tensors="pt").to(self.device)
+
+        tokenized_inputs = self.tokenizer(
+            inputs,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        ).to(self.device)
         return tokenized_inputs
-    
+
     @torch.no_grad()
-    def __call__(self, texts, labels, threshold = 0.5, batch_size=8, labels_chunk_size=4): #labels - List[str]
+    def __call__(
+        self, texts, labels, threshold=0.5, batch_size=8, labels_chunk_size=4
+    ):  # labels - List[str]
         results = []
 
         iterable = range(0, len(texts), batch_size)
@@ -443,32 +653,38 @@ class ZeroShotClassificationWithLabelsChunkingPipeline(BaseZeroShotClassificatio
             iterable = tqdm(iterable)
 
         for idx in iterable:
-            batch_texts = texts[idx:idx+batch_size]
+            batch_texts = texts[idx : idx + batch_size]
 
             batch_results = []
             for labels_batch in range(0, len(labels), labels_chunk_size):
-                curr_labels = labels[labels_batch:labels_batch+labels_chunk_size]
+                curr_labels = labels[labels_batch : labels_batch + labels_chunk_size]
                 tokenized_inputs = self.prepare_inputs(batch_texts, curr_labels)
                 model_output = self.model(**tokenized_inputs)
                 logits = model_output.logits
                 curr_results = []
-                if self.classification_type == 'single-label':
+                if self.classification_type == "single-label":
                     for i in range(len(batch_texts)):
                         score = logits[i]
                         pred_label = curr_labels[torch.argmax(score).item()]
-                        curr_results.append([{'label': pred_label, 'score': score.max().item()}])
-                elif self.classification_type == 'multi-label':
+                        curr_results.append(
+                            [{"label": pred_label, "score": score.max().item()}]
+                        )
+                elif self.classification_type == "multi-label":
                     sigmoid = torch.nn.Sigmoid()
                     probs = sigmoid(logits)
                     for i in range(len(batch_texts)):
                         text_results = []
                         for j, prob in enumerate(probs[i]):
                             score = prob.item()
-                            if score>threshold:
-                                text_results.append({'label': curr_labels[j], 'score': score})
+                            if score > threshold:
+                                text_results.append(
+                                    {"label": curr_labels[j], "score": score}
+                                )
                         curr_results.append(text_results)
                 else:
-                    raise ValueError("Unsupported classification type: choose 'single-label' or 'multi-label'")
+                    raise ValueError(
+                        "Unsupported classification type: choose 'single-label' or 'multi-label'"
+                    )
                 batch_results.append(curr_results)
 
             # Merge results from different label chunks
@@ -477,15 +693,18 @@ class ZeroShotClassificationWithLabelsChunkingPipeline(BaseZeroShotClassificatio
                 text_results = []
                 for chunk_result in batch_results:
                     text_results.extend(chunk_result[i])
-                
-                if self.classification_type == 'single-label':
+
+                if self.classification_type == "single-label":
                     # Keep only the highest scoring label
-                    merged_batch_results.append([max(text_results, key=lambda x: x['score'])])
+                    merged_batch_results.append(
+                        [max(text_results, key=lambda x: x["score"])]
+                    )
                 else:
                     # Sort multi-label results by score in descending order
-                    merged_batch_results.append(sorted(text_results, key=lambda x: x['score'], reverse=True))
-            
+                    merged_batch_results.append(
+                        sorted(text_results, key=lambda x: x["score"], reverse=True)
+                    )
+
             results.extend(merged_batch_results)
-        
+
         return results
-      

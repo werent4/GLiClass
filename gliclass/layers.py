@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2020 Microsoft and the Hugging Face Inc. team and Knowledgator.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,28 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Union
+
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from transformers.activations import ACT2FN
 
 from .config import GLiClassModelConfig
 
+
 class LstmSeq2SeqEncoder(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers=1, dropout=0., bidirectional=False):
+    def __init__(
+        self, input_size, hidden_size, num_layers=1, dropout=0.0, bidirectional=False
+    ):
         super(LstmSeq2SeqEncoder, self).__init__()
-        self.lstm = nn.LSTM(input_size=input_size,
-                            hidden_size=hidden_size,
-                            num_layers=num_layers,
-                            dropout=dropout,
-                            bidirectional=bidirectional,
-                            batch_first=True)
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            bidirectional=bidirectional,
+            batch_first=True,
+        )
 
     def forward(self, x, mask, hidden=None):
         # Packing the input sequence
         lengths = mask.sum(dim=1).cpu()
-        packed_x = pack_padded_sequence(x, lengths, batch_first=True, enforce_sorted=False)
+        packed_x = pack_padded_sequence(
+            x, lengths, batch_first=True, enforce_sorted=False
+        )
 
         # Passing packed sequence through LSTM
         packed_output, hidden = self.lstm(packed_x, hidden)
@@ -44,41 +51,58 @@ class LstmSeq2SeqEncoder(nn.Module):
 
         return output
 
+
 class FeaturesProjector(nn.Module):
     def __init__(self, config: GLiClassModelConfig):
         super().__init__()
 
-        self.linear_1 = nn.Linear(config.encoder_config.hidden_size, config.hidden_size, bias=True)
+        self.linear_1 = nn.Linear(
+            config.encoder_config.hidden_size, config.hidden_size, bias=True
+        )
         self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(config.encoder_config.hidden_size, config.encoder_config.hidden_size, bias=True)
+        self.linear_2 = nn.Linear(
+            config.encoder_config.hidden_size,
+            config.encoder_config.hidden_size,
+            bias=True,
+        )
 
     def forward(self, features):
         hidden_states = self.linear_1(features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
+
 
 class BiEncoderProjector(nn.Module):
     def __init__(self, config: GLiClassModelConfig):
         super().__init__()
 
-        self.linear_1 = nn.Linear(config.label_model_config.hidden_size, config.hidden_size, bias=True)
+        self.linear_1 = nn.Linear(
+            config.label_model_config.hidden_size, config.hidden_size, bias=True
+        )
         self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(config.hidden_size, config.encoder_config.hidden_size, bias=True)
+        self.linear_2 = nn.Linear(
+            config.hidden_size, config.encoder_config.hidden_size, bias=True
+        )
 
     def forward(self, features):
         hidden_states = self.linear_1(features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
-    
+
+
 class AudioBiEncoderProjector(nn.Module):
     def __init__(self, config: GLiClassModelConfig):
         super().__init__()
 
-        self.linear_1 = nn.Linear(config.audio_model_config.hidden_size, config.hidden_size, bias=True)
+        self.linear_1 = nn.Linear(
+            config.audio_model_config.hidden_size, config.hidden_size, bias=True
+        )
         self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(config.hidden_size, config.encoder_config.hidden_size, bias=True)
+        self.linear_2 = nn.Linear(
+            config.hidden_size, config.encoder_config.hidden_size, bias=True
+        )
 
     def forward(self, features):
         hidden_states = self.linear_1(features)
@@ -86,8 +110,9 @@ class AudioBiEncoderProjector(nn.Module):
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
+
 # Copied from transformers.models.deberta.modeling_deberta.DropoutContext
-class DropoutContext(object):
+class DropoutContext:
     def __init__(self):
         self.dropout = 0
         self.mask = None
@@ -138,7 +163,11 @@ class XDropout(torch.autograd.Function):
             return grad_output, None
 
     @staticmethod
-    def symbolic(g: torch._C.Graph, input: torch._C.Value, local_ctx: Union[float, DropoutContext]) -> torch._C.Value:
+    def symbolic(
+        g: torch._C.Graph,
+        input: torch._C.Value,
+        local_ctx: Union[float, DropoutContext],
+    ) -> torch._C.Value:
         from torch.onnx import symbolic_opset12
 
         dropout_p = local_ctx
@@ -153,7 +182,8 @@ class XDropout(torch.autograd.Function):
         # if opset_version < 12:
         #   return torch.onnx.symbolic_opset9.dropout(g, input, dropout_p, train)
         return symbolic_opset12.dropout(g, input, dropout_p, train)
-    
+
+
 # Copied from transformers.models.deberta.modeling_deberta.StableDropout
 class StableDropout(nn.Module):
     """
@@ -203,6 +233,7 @@ class StableDropout(nn.Module):
         else:
             return self.drop_prob
 
+
 class SelfAttentionBlock(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.1):
         super().__init__()
@@ -213,6 +244,7 @@ class SelfAttentionBlock(nn.Module):
     def forward(self, x, mask=None):
         attn_output, _ = self.self_attn(x, x, x, attn_mask=mask)
         return self.norm(x + self.dropout(attn_output))
+
 
 class CrossAttentionBlock(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.1):
@@ -225,17 +257,22 @@ class CrossAttentionBlock(nn.Module):
         attn_output, _ = self.cross_attn(query, key, value, attn_mask=mask)
         return self.norm(query + self.dropout(attn_output))
 
+
 class Fuser(nn.Module):
     def __init__(self, d_model, num_heads, num_layers, dropout=0.1):
         super().__init__()
         self.d_model = d_model
-        self.layers = nn.ModuleList([
-            nn.ModuleList([
-                SelfAttentionBlock(d_model, num_heads, dropout),
-                CrossAttentionBlock(d_model, num_heads, dropout)
-            ])
-            for _ in range(num_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        SelfAttentionBlock(d_model, num_heads, dropout),
+                        CrossAttentionBlock(d_model, num_heads, dropout),
+                    ]
+                )
+                for _ in range(num_layers)
+            ]
+        )
         self.fc = nn.Linear(d_model, d_model)
 
     def forward(self, query, key, query_mask=None, key_mask=None):
@@ -254,45 +291,46 @@ class Fuser(nn.Module):
 
         return query
 
+
 class LayerwiseAttention(nn.Module):
     def __init__(self, num_layers, hidden_size, output_size=None):
         super().__init__()
         self.num_layers = num_layers
         self.hidden_size = hidden_size
         self.output_size = output_size if output_size is not None else hidden_size
-        
+
         # Squeeze operation
         self.squeeze = nn.Linear(hidden_size, 1)
-        
+
         # Excitation operation
         self.W1 = nn.Linear(num_layers, num_layers // 2)
         self.W2 = nn.Linear(num_layers // 2, num_layers)
-        
+
         # Final projection
         self.output_projection = nn.Linear(self.hidden_size, self.output_size)
-        
+
     def forward(self, encoder_outputs):
         # encoder_outputs is a list of tensors, each of shape [B, L, D]
         B, L, D = encoder_outputs[0].shape
-        
+
         # Concatenate all layers
         U = torch.stack(encoder_outputs, dim=1)  # [B, K, L, D]
-        
+
         # Squeeze operation
         Z = self.squeeze(U).squeeze(-1)  # [B, K, L]
         Z = Z.mean(dim=2)  # [B, K]
-        
+
         # Excitation operation
         s = self.W2(F.relu(self.W1(Z)))  # [B, K]
         s = torch.sigmoid(s)  # [B, K]
-        
+
         # Apply attention weights
         U_weighted = U * s.unsqueeze(-1).unsqueeze(-1)  # [B, K, L, D]
-        
+
         # Sum across layers
         U_sum = U_weighted.sum(dim=1)  # [B, L, D]
-        
+
         # Final projection
         output = self.output_projection(U_sum)  # [B, L, output_size]
-        
+
         return output

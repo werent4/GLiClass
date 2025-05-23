@@ -11,14 +11,18 @@ def sequence_contrastive_loss(embeddings, mask):
     embeddings = F.normalize(embeddings, p=2, dim=-1)
 
     # Compute similarity matrix
-    sim_matrix = torch.matmul(embeddings, embeddings.transpose(1, 2)) #/ self.temperature
-    
+    sim_matrix = torch.matmul(
+        embeddings, embeddings.transpose(1, 2)
+    )  # / self.temperature
+
     # Create labels for cross entropy (diagonal indices)
     labels = torch.arange(L, device=embeddings.device).unsqueeze(0).expand(B, -1)
-    
+
     # Compute loss for each element in the batch
-    loss = F.cross_entropy(sim_matrix.reshape(B*L, L), labels.reshape(-1), reduction='none')
-    
+    loss = F.cross_entropy(
+        sim_matrix.reshape(B * L, L), labels.reshape(-1), reduction="none"
+    )
+
     # Apply mask to loss
     loss = loss.view(B, L) * mask
 
@@ -29,13 +33,13 @@ def sequence_contrastive_loss(embeddings, mask):
 
 
 def focal_loss_with_logits(
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        alpha: float = 0.25,
-        gamma: float = 2,
-        reduction: str = "none",
-        label_smoothing: float = 0.0,
-        ignore_index: int = -100  # default value for ignored index
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.25,
+    gamma: float = 2,
+    reduction: str = "none",
+    label_smoothing: float = 0.0,
+    ignore_index: int = -100,  # default value for ignored index
 ) -> torch.Tensor:
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
@@ -54,7 +58,7 @@ def focal_loss_with_logits(
                 ``'none'``: No reduction will be applied to the output.
                 ``'mean'``: The output will be averaged.
                 ``'sum'``: The output will be summed. Default: ``'none'``.
-        label_smoothing (float): Specifies the amount of smoothing when computing the loss, 
+        label_smoothing (float): Specifies the amount of smoothing when computing the loss,
                                                                 where 0.0 means no smoothing.
         ignore_index (int): Specifies a target value that is ignored and does not contribute
                             to the input gradient. Default: ``-100``.
@@ -63,7 +67,7 @@ def focal_loss_with_logits(
     """
     # Create a mask to ignore specified index
     valid_mask = targets != ignore_index
-    
+
     # Apply label smoothing if needed
     if label_smoothing != 0:
         with torch.no_grad():
@@ -92,7 +96,9 @@ def focal_loss_with_logits(
     if reduction == "none":
         return loss
     elif reduction == "mean":
-        return loss.sum() / valid_mask.sum()  # Normalize by the number of valid (non-ignored) elements
+        return (
+            loss.sum() / valid_mask.sum()
+        )  # Normalize by the number of valid (non-ignored) elements
     elif reduction == "sum":
         return loss.sum()
     else:

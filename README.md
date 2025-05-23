@@ -89,7 +89,7 @@ for predict in results:
 
 ### 🔊 Audio Classification
 ```python
-glicalss_config = GLiClassModelConfig.from_pretrained("models_sampled/checkpoint-24/config.json") 
+glicalss_config = GLiClassModelConfig.from_pretrained("models_sampled/checkpoint-24/config.json")
 model = GLiClassModel(glicalss_config)
 tokenizer = AutoTokenizer.from_pretrained("models_sampled/checkpoint-24")
 audio_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(

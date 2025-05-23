@@ -1,3 +1,7 @@
-from .model import GLiClassModel, GLiClassBiEncoder, GLiClassUniEncoder
 from .config import GLiClassModelConfig
-from .pipeline import ZeroShotClassificationPipeline, BiEncoderZeroShotClassificationPipeline, ZeroShotClassificationWithLabelsChunkingPipeline
+from .model import GLiClassBiEncoder, GLiClassModel, GLiClassUniEncoder
+from .pipeline import (
+    BiEncoderZeroShotClassificationPipeline,
+    ZeroShotClassificationPipeline,
+    ZeroShotClassificationWithLabelsChunkingPipeline,
+)
