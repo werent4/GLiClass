@@ -14,6 +14,8 @@ test.ipynb
 demo1.py
 .gradio/
 datasets/
+*.wav
+my_exps/
 
 # Distribution / packaging
 .Python

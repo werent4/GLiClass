@@ -1,18 +1,18 @@
+import argparse
+import hashlib
 import json
 import os
+import pickle
 import random
-import argparse
+
 import numpy as np
 import torch
+from tqdm import tqdm
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Processor
 
 from datasets import Audio, load_dataset
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
-import hashlib
-import pickle
-
-from tqdm import tqdm
 
 audio_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
     "facebook/wav2vec2-base-960h"
@@ -54,7 +54,7 @@ def get_label_mapping_from_dataset(dataset, audio_column="audio"):
             dataset.features["label"], "names"
         ):
             label_names = dataset.features["label"].names
-            label_mapping = {i: name for i, name in enumerate(label_names)}
+            label_mapping = dict(enumerate(label_names))
             print("Labels mapping:")
             print(label_mapping)
             return label_mapping
@@ -95,6 +95,7 @@ def main(args):
         "num_samples": len(dataset),
         "label_mapping": id2label,
         "audio_dir": audio_dir,
+        "dataset_file": os.path.basename(args.save_path).split("/")[-1],
     }
 
     metadata_path = os.path.join(os.path.dirname(args.save_path), "metadata.json")
@@ -102,18 +103,24 @@ def main(args):
         json.dump(metadata, f, indent=4)
 
     dataset_list = []
+    classes_ = {}
     for idx, example in enumerate(
         tqdm(dataset, desc="Processing audio files", total=len(dataset))
     ):
         try:
-            audio_path = extract_and_save_features(example, audio_dir)
+            audio_path = extract_and_save_features(example, os.path.abspath(audio_dir))
 
             label = (
                 id2label[example["label"]]
                 if example["label"] in id2label
                 else "unknown"
             )
-
+            if label not in classes_:
+                classes_[label] = 0
+            if classes_[label] >= 15:
+                print(f"Skipping label '{label}' as it has reached the limit of 15 MB.")
+                continue
+            classes_[label] += 1
             all_labels = list(id2label.values())
             random.shuffle(
                 all_labels
@@ -180,7 +187,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--audio_column", type=str, default="audio")
     parser.add_argument(
-        "--save_path", type=str, default="./datasets/processed_dataset.json"
+        "--save_path", type=str, default="./datasets1/processed_dataset.json"
     )
     parser.add_argument(
         "--clean_temp",
