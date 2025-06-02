@@ -1,4 +1,5 @@
 import random
+import numpy as np
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -15,7 +16,7 @@ class GLiClassDataset(Dataset):
         architecture_type="uni-encoder",
         prompt_first=False,
         get_negatives=False,
-        max_labels=50,
+        max_labels=200,
         labels_tokenizer=None,
         shuffle_labels=True,
     ):
@@ -166,7 +167,15 @@ class GLiClassDataset(Dataset):
             example, label2idx, self.problem_type
         )
         tokenized_inputs["labels_text"] = example["all_labels"]
-        tokenized_inputs["audio_input"] = torch.load(example["audio_features_path"])
+        audio_data = torch.load(example["audio_features_path"], weights_only=False)
+        if isinstance(audio_data, np.ndarray):
+            audio_data = torch.from_numpy(audio_data).float()
+        elif isinstance(audio_data, torch.Tensor):
+            audio_data = audio_data.float()
+        else:
+            audio_data = torch.tensor(audio_data, dtype=torch.float32)
+        
+        tokenized_inputs["audio_input"] = audio_data
         return tokenized_inputs
 
     def __len__(self):

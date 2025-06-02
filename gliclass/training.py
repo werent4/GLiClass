@@ -255,8 +255,98 @@ class Trainer(transformers.Trainer):
 
         return self.optimizer
 
+class FrozenTrainer(Trainer):
+    def __init__(self, *args, freeze_audio_encoder_until_percent=0.25, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.freeze_audio_encoder_until_percent = freeze_audio_encoder_until_percent
+        self.total_steps = 0
+        self.audio_encoder_unfrozen = False
+        
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'audio_encoder'):
+            for param in self.model.model.audio_encoder.parameters():
+                param.requires_grad = False
+            print("Audio encoder parameters are frozen.")
 
-@dataclass
+        self._initialize_unfreeze_step()
+
+    def _initialize_unfreeze_step(self):
+        train_dataloader = self.get_train_dataloader()
+        total_steps = len(train_dataloader) * self.args.num_train_epochs
+        self.unfreeze_step = int(total_steps * self.freeze_audio_encoder_until_percent)
+        print(f"Audio encoder will be unfrozen after {self.unfreeze_step} steps (out of {total_steps} total steps).")        
+
+    def training_step(self, model, inputs, *args, **kwargs) -> torch.Tensor:
+        """
+        Perform a training step on a batch of inputs.
+
+        Subclass and override to inject custom behavior.
+
+        Args:
+            model (`nn.Module`):
+                The model to train.
+            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
+                The inputs and targets of the model.
+
+                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                argument `labels`. Check your model's documentation for all accepted arguments.
+
+        Return:
+            `torch.Tensor`: The tensor with training loss on this batch.
+        """
+        model.train()
+
+        self.global_step = self.state.global_step
+        if (not self.audio_encoder_unfrozen and 
+            self.global_step >= self.unfreeze_step and 
+            hasattr(model, 'model') and 
+            hasattr(model.model, 'audio_encoder')):
+            
+            for param in model.model.audio_encoder.parameters():
+                param.requires_grad = True
+            
+            self.audio_encoder_unfrozen = True
+            print(f"Step {self.global_step}: Audio encoder parameters are unfrozen.")
+
+        try:
+            if "labels_text" in inputs:
+                inputs.pop("labels_text")
+            if "input_texts" in inputs:
+                inputs.pop("input_texts")
+            inputs = self._prepare_inputs(inputs)
+            if is_sagemaker_mp_enabled():
+                loss_mb = smp_forward_backward(  # noqa: F821
+                    model, inputs, self.args.gradient_accumulation_steps
+                )
+                return loss_mb.reduce_mean().detach().to(self.args.device)
+
+            with self.compute_loss_context_manager():
+                loss = self.compute_loss(model, inputs)
+
+            del inputs
+            torch.cuda.empty_cache()
+
+            kwargs = {}
+
+            # For LOMO optimizers you need to explicitly use the learnign rate
+            # if self.args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
+            #     kwargs["learning_rate"] = self._get_learning_rate()
+
+            if self.args.n_gpu > 1:
+                loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+            if self.use_apex:
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:  # noqa: F821
+                    scaled_loss.backward()
+            else:
+                self.accelerator.backward(loss, **kwargs)
+
+            return loss.detach() / self.args.gradient_accumulation_steps
+        except Exception as e:
+            print(f"Skipping iteration due to error: {e}")
+            model.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            return torch.tensor(0.0, requires_grad=True).to(model.device)
+    
 class RLTrainerConfig(TrainingArguments):
     cliprange: float = field(
         default=0.2,

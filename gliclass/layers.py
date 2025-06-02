@@ -104,11 +104,48 @@ class AudioBiEncoderProjector(nn.Module):
             config.hidden_size, config.encoder_config.hidden_size, bias=True
         )
 
+        self.log_gradients = False
+        self.log_frequency = 50
+        self.step_counter = 0
+
+        self._register_grad_hooks()
+
+    def _register_grad_hooks(self):
+        self.grad_norms = {'linear_1': [], 'linear_2': []}
+        
+        def grad_hook_linear1(grad):
+            if grad is not None and self.log_gradients:
+                norm = grad.norm().item()
+                self.grad_norms['linear_1'].append(norm)
+                if self.step_counter % self.log_frequency == 0:
+                    print(f"Step {self.step_counter} - {self.__class__.__name__}.linear_1.weight grad norm: {norm:.4f}")
+            return grad
+            
+        def grad_hook_linear2(grad):
+            if grad is not None and self.log_gradients:
+                norm = grad.norm().item()
+                self.grad_norms['linear_2'].append(norm)
+                if self.step_counter % self.log_frequency == 0:
+                    print(f"Step {self.step_counter} - {self.__class__.__name__}.linear_2.weight grad norm: {norm:.4f}")
+            return grad
+        
+        self.linear_1.weight.register_hook(grad_hook_linear1)
+        self.linear_2.weight.register_hook(grad_hook_linear2)
+
+
     def forward(self, features):
+        self.step_counter += 1
+
         hidden_states = self.linear_1(features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
+
+    def enable_grad_logging(self, enable=True, frequency=100):
+        self.log_gradients = enable
+        self.log_frequency = frequency
+        print(f"Gradient logging {'enabled' if enable else 'disabled'}, frequency: {frequency} steps")
+
 
 
 # Copied from transformers.models.deberta.modeling_deberta.DropoutContext

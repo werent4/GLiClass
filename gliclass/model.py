@@ -762,7 +762,7 @@ class GLiClassBiEncoderFused(GLiClassBiEncoder):
             class_embeddings=class_embeddings if output_class_embeddings else None,
         )
 
-
+from .sheduler import CosineDropoutScheduler
 class GLiClassAudio(GLiClassBaseModel):
     def __init__(self, config: GLiClassModelConfig, from_pretrained=False):
         super().__init__(config)
@@ -796,12 +796,16 @@ class GLiClassAudio(GLiClassBaseModel):
         self.audio_encoder = initialize_encoder(
             config.audio_model_config, config.audio_model_name, from_pretrained
         )
+
         self.audio_projector = AudioBiEncoderProjector(config)
+
+        self.encoder_scheduler = CosineDropoutScheduler(p_max=0.3, p_min=0.05, total_steps=22950//2, osc_freq=16, osc_strength=0.07, mode="-")
+        self.audio_encoder_scheduler = CosineDropoutScheduler(p_max=0.3, p_min=0.05, total_steps=22950//2, osc_freq=16, osc_strength=0.07, mode="+")
 
     def pool_outputs(self, audio_encoder_outputs):
         audio_embeddings = self.pooler(audio_encoder_outputs.last_hidden_state)
         audio_embeddings = self.audio_projector(audio_embeddings)
-        audio_embeddings = self.dropout(audio_embeddings)
+        # audio_embeddings = self.dropout(audio_embeddings)
         if self.config.normalize_features:
             audio_embeddings = nn.functional.normalize(
                 audio_embeddings, p=2, dim=-1, eps=self.epsilon
@@ -850,7 +854,10 @@ class GLiClassAudio(GLiClassBaseModel):
 
         pooled_audio = self.pooler(audio_final_emb)
         pooled_audio = self.text_projector(pooled_audio)
-        pooled_audio = self.dropout(pooled_audio)
+        # pooled_audio = self.dropout(pooled_audio)
+
+        self.audio_encoder_scheduler.step()
+        self.encoder_scheduler.step()
 
         if self.config.normalize_features:
             pooled_audio = nn.functional.normalize(pooled_audio, p=2, dim=-1)
@@ -860,6 +867,8 @@ class GLiClassAudio(GLiClassBaseModel):
         if self.config.normalize_features:
             classes_embedding = nn.functional.normalize(classes_embedding, p=2, dim=-1)
 
+        self.audio_encoder_scheduler(pooled_audio)
+        self.encoder_scheduler(classes_embedding)
         logits = self.scorer(pooled_audio, classes_embedding)
 
         if self.config.normalize_features:
