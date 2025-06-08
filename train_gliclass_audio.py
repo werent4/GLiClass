@@ -104,9 +104,9 @@ def main(args):
 
     train_dataset = GLiClassDataset(train_data, tokenizer, args.max_length, 
                                     args.problem_type, args.architecture_type, 
-                                    args.prompt_first)
+                                    args.prompt_first, labels_tokenizer=tokenizer)
     test_dataset = GLiClassDataset(test_data, tokenizer, args.max_length, args.problem_type, 
-                                        args.architecture_type, args.prompt_first)
+                                        args.architecture_type, args.prompt_first, labels_tokenizer=tokenizer)
 
     data_collator = DataCollatorWithPadding(device=device)
 
@@ -137,7 +137,7 @@ def main(args):
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         tokenizer=tokenizer,
-        data_collator=data_collator,
+        # data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
     trainer.train()
@@ -159,15 +159,15 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, default= None)
-    parser.add_argument('--encoder_model_name', type=str, default = 'microsoft/deberta-v3-small')
+    parser.add_argument('--encoder_model_name', type=str, default = 'answerdotai/ModernBERT-base')
     parser.add_argument('--audio_model_name', type=str, default = 'facebook/wav2vec2-base-960h') # 
-    parser.add_argument('--save_path', type=str, default = 'models/')
-    parser.add_argument('--data_path', type=str, default = 'datasets/processed_dataset.json') #
+    parser.add_argument('--save_path', type=str, default = 'models/part-final-gliclass-audio-bi-1-wds-0.015-red-sum')
+    parser.add_argument('--data_path', type=str, default = '/mnt/werent4-storage/datasets/gliclass-audio-datset/gliclass-audio-datset-final.json') #
     parser.add_argument('--problem_type', type=str, default='multi_label_classification')
-    parser.add_argument('--pooler_type', type=str, default='avg')
+    parser.add_argument('--pooler_type', type=str, default='first')
     parser.add_argument('--scorer_type', type=str, default='simple')
-    parser.add_argument('--architecture_type', type=str, default='audio-encoder')
-    parser.add_argument('--normalize_features', type=bool, default=False)
+    parser.add_argument('--architecture_type', type=str, default='audio-bi-encoder')
+    parser.add_argument('--normalize_features', type=bool, default=True)
     parser.add_argument('--extract_text_features', type=bool, default=False)
     parser.add_argument('--prompt_first', type=bool, default=True)
     parser.add_argument('--use_lstm', type=bool, default=False)
@@ -175,19 +175,19 @@ if __name__ == '__main__':
     parser.add_argument('--shuffle_labels', type=bool, default=True)
     parser.add_argument('--num_epochs', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--encoder_lr', type=float, default=1e-6)
+    parser.add_argument('--encoder_lr', type=float, default=1e-5)
     parser.add_argument('--others_lr', type=float, default=1e-5)
-    parser.add_argument('--encoder_weight_decay', type=float, default=0.01)
-    parser.add_argument('--others_weight_decay', type=float, default=0.01)
+    parser.add_argument('--encoder_weight_decay', type=float, default=0.015)
+    parser.add_argument('--others_weight_decay', type=float, default=0.015)
     parser.add_argument('--warmup_ratio', type=float, default=0.05)
     parser.add_argument('--lr_scheduler_type', type=str, default='cosine')
-    parser.add_argument('--focal_loss_alpha', type=float, default=-1)
-    parser.add_argument('--focal_loss_gamma', type=float, default=-1)
+    parser.add_argument('--focal_loss_alpha', type=float, default=0.9)
+    parser.add_argument('--focal_loss_gamma', type=float, default=2.5)
     parser.add_argument('--contrastive_loss_coef', type=float, default=0.)
     parser.add_argument('--max_length', type=int, default=1024)
-    parser.add_argument('--save_steps', type=int, default=1000)
+    parser.add_argument('--save_steps', type=int, default=720)
     parser.add_argument('--save_total_limit', type=int, default=3)
-    parser.add_argument('--num_workers', type=int, default=12)
+    parser.add_argument('--num_workers', type=int, default=1)
     parser.add_argument('--fp16', type=bool, default=False)
     args = parser.parse_args()
 

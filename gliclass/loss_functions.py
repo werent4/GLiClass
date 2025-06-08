@@ -33,7 +33,7 @@ def focal_loss_with_logits(
         targets: torch.Tensor,
         alpha: float = 0.25,
         gamma: float = 2,
-        reduction: str = "none",
+        reduction: str = "sum",
         label_smoothing: float = 0.0,
         ignore_index: int = -100  # default value for ignored index
 ) -> torch.Tensor:

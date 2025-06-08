@@ -127,6 +127,19 @@ class GLiClassDataset(Dataset):
     def tokenize_and_prepare_labels_for_audiobiencoder(self, example):
         if self.shuffle_labels:
             random.shuffle(example['all_labels'])
+        class_texts = example['all_labels']
+
+        tokenized_inputs = self.tokenize_labels(class_texts) # input_ids, attention_mask for classes
+        label2idx = {label: idx for idx, label in enumerate(example['all_labels'])}
+        tokenized_inputs['labels_mask'] = torch.ones(len(class_texts))
+        tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
+        tokenized_inputs['labels_text'] =  example['all_labels']
+        tokenized_inputs['audio_input'] = torch.load(example['audio_features_path'], weights_only=False)
+        return tokenized_inputs
+    
+    def tokenize_and_prepare_labels_for_audioencoder(self, example):
+        if self.shuffle_labels:
+            random.shuffle(example['all_labels'])
         input_text = self.prepare_prompt(example)
         input_text.append('<<AUDIO>>')
         input_text = ''.join(input_text)
@@ -157,6 +170,8 @@ class GLiClassDataset(Dataset):
         elif self.architecture_type in {'bi-encoder', 'bi-encoder-fused'}:
             model_inputs = self.tokenize_and_prepare_labels_for_biencoder(example)
         elif self.architecture_type in {'audio-encoder'}:
+            model_inputs = self.tokenize_and_prepare_labels_for_audioencoder(example)
+        elif self.architecture_type in {'audio-bi-encoder'}:
             model_inputs = self.tokenize_and_prepare_labels_for_audiobiencoder(example)
         else:
             raise NotImplementedError('This architecture type is not implemented.')
@@ -193,6 +208,7 @@ def pad_2d_tensor(key_data):
 
     return padded_tensors
 
+import numpy as np
 class DataCollatorWithPadding:
     def __init__(self, device = 'cuda:0'):
         self.device = device
@@ -216,8 +232,20 @@ class DataCollatorWithPadding:
                     padded_batch[key] = key_data
                 else:
                     max_length = max(len(seq) for seq in key_data)
-                    padded_batch[key] = torch.tensor([seq + [0] * (max_length - len(seq)) 
-                                                        for seq in key_data])
+                    padded_sequences = []
+                    for seq in key_data:
+                        padded_seq = seq + [0] * (max_length - len(seq))
+                        padded_sequences.append(padded_seq)
+                    try:
+                        padded_batch[key] = torch.tensor(padded_sequences)
+                    except Exception as e:
+                        with open('error_log.txt', 'a') as f:
+                            f.write(padded_sequences.__str__() + '\n')
+                        print(type(padded_sequences[-1]))
+                        print(type(padded_sequences[-1][0]))
+                        raise ValueError(f"Error converting {key} to tensor: {e}")
+                    
+
             elif type(key_data[0]) in {int, float}:
                 padded_batch[key] = torch.tensor(key_data)
             elif isinstance(key_data[0], str):
