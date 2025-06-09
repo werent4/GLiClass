@@ -643,7 +643,6 @@ class GLiClassAudio(GLiClassBaseModel):
         self.audio_projector = AudioBiEncoderProjector(config)
 
     def pool_outputs(self, audio_encoder_outputs):
-        # audio_embeddings = self.pooler(audio_encoder_outputs.last_hidden_state)
         audio_embeddings = self.audio_projector(audio_encoder_outputs.last_hidden_state)
         audio_embeddings = self.dropout(audio_embeddings)
         if self.config.normalize_features:
@@ -651,7 +650,7 @@ class GLiClassAudio(GLiClassBaseModel):
         return audio_embeddings
     
     def encode_audio(self, input_values):
-        outputs = self.audio_encoder(input_values)#.squeeze(0))
+        outputs = self.audio_encoder(input_values)
         audio_embeddings = self.pool_outputs(outputs)
         return audio_embeddings
     
@@ -688,9 +687,6 @@ class GLiClassAudio(GLiClassBaseModel):
             new_attention_masks.append(new_mask)
 
 
-            # if len(audio_positions) > 0:
-            #     inputs_embeds[batch_idx, audio_positions[0]] = audio_embeddings[batch_idx]
-
         max_len = max(emb.shape[0] for emb in new_inputs_embeds)
         padded_embeds = []
         padded_masks = []
@@ -714,28 +710,23 @@ class GLiClassAudio(GLiClassBaseModel):
         return torch.stack(padded_embeds), torch.stack(padded_masks) #inputs_embeds
 
     def forward(self, input_ids, attention_mask, audio_input, labels=None, **kwargs):
-        # print(f"audio_input shape: {audio_input.shape}")
 
         audio_embeddings = self.encode_audio(audio_input)  # [batch, audio_seq_len, hidden]
-        # print(f"audio_embeddings shape: {audio_embeddings.shape}")
 
         embedding_layer = self.encoder_model.get_input_embeddings()
         inputs_embeds = embedding_layer(input_ids)
-        # print(f"inputs_embeds shape: {inputs_embeds.shape}")
 
         inputs_embeds, attention_mask = self.insert_audio_embeddings(inputs_embeds, input_ids, attention_mask, audio_embeddings)
 
         outputs = self.encoder_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
         classes_embedding, classes_embedding_mask, audio_final_emb, audio_mask = self._extract_class_features(outputs[0], input_ids, attention_mask)
 
-        # print(f"audio_final_emb shape: {audio_final_emb.shape}")
         if self.config.use_lstm:
             audio_final_emb = self.lstm(audio_final_emb, audio_mask)
 
         pooled_audio = self.pooler(audio_final_emb)
         pooled_audio = self.text_projector(pooled_audio)
         pooled_audio = self.dropout(pooled_audio)
-        # print(f"pooled_audio shape: {pooled_audio.shape}")
 
         if self.config.normalize_features:  
             pooled_audio = nn.functional.normalize(pooled_audio, p=2, dim=-1)
@@ -779,17 +770,14 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
         self.audio_biencoder_projector = AudioBiEncoderProjector(config)
 
     def pool_outputs(self, audio_encoder_outputs):
-        # audio_embeddings = self.pooler(audio_encoder_outputs.last_hidden_state)
         audio_embeddings = self.audio_biencoder_projector(audio_encoder_outputs.last_hidden_state)
-        # audio_embeddings = self.text_projector(audio_embeddings) 
         audio_embeddings = self.dropout(audio_embeddings)
         if self.config.normalize_features:
             audio_embeddings = nn.functional.normalize(audio_embeddings, p=2, dim=-1, eps=self.epsilon)
         return audio_embeddings
 
     def encode_audio(self, input_values):
-        outputs = self.audio_encoder(input_values)#.unsqueeze(0))
-        # print('audio outputs:', outputs.last_hidden_state.shape)
+        outputs = self.audio_encoder(input_values)
         audio_embeddings = self.pool_outputs(outputs)
         return audio_embeddings
     
@@ -823,8 +811,8 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
 
     def forward(
             self,
-            input_ids: Optional[torch.Tensor] = None, # classes encoded with encoder
-            attention_mask: Optional[torch.Tensor] = None, # classes AM encoded with encoder
+            input_ids: Optional[torch.Tensor] = None, # classes encoded with encoder class_input_ids
+            attention_mask: Optional[torch.Tensor] = None, # classes AM encoded with encoder class_attention_mask
             audio_input: Optional[torch.Tensor] = None,
             labels_mask: Optional[torch.Tensor] = None,
             labels: Optional[torch.Tensor] = None,
@@ -833,12 +821,9 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
             return_dict: Optional[bool] = True,
             **kwargs
         ):
-        # print('audio_input.shape:', audio_input.shape)
-        text_embeddings = self.encode_audio(audio_input)
+        audio_embeddings = self.encode_audio(audio_input)
         class_embeddings = self.encode_classes(input_ids, attention_mask, labels_mask)
-        # print('text_embeddings shape:', text_embeddings.shape)
-        # print('class_embeddings shape:', class_embeddings.shape)
-        logits = self.scorer(text_embeddings, class_embeddings) * self.logit_scale.to(class_embeddings.device)
+        logits = self.scorer(audio_embeddings, class_embeddings) * self.logit_scale.to(class_embeddings.device)
 
         if labels_mask is not None: 
             logits = torch.where(labels_mask == 0, -1e3, logits)
@@ -851,7 +836,7 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
 
         return GLiClassOutput(
             loss=loss, logits=logits, 
-            text_embeddings = text_embeddings if output_text_embeddings else None,
+            text_embeddings = audio_embeddings if output_text_embeddings else None,
             class_embeddings = class_embeddings if output_class_embeddings else None,
         )
 

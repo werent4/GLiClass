@@ -35,17 +35,17 @@ class ScorerWeightedDot(nn.Module):
 
         return scores
     
-# class ScorerDot(nn.Module):
-#     def __init__(self, *args):
-#         super().__init__()
-#         pass
-
-#     def forward(self, text_rep, label_rep):
-#         # dot product with einsum
-#         scores = torch.einsum('BD,BCD->BC', text_rep, label_rep)
-#         return scores
-
 class ScorerDot(nn.Module):
+    def __init__(self, *args):
+        super().__init__()
+        pass
+
+    def forward(self, text_rep, label_rep):
+        # dot product with einsum
+        scores = torch.einsum('BD,BCD->BC', text_rep, label_rep)
+        return scores
+
+class AudioTokenScorerDot(nn.Module):
     def __init__(self, *args):
         super().__init__()
         pass
@@ -54,7 +54,7 @@ class ScorerDot(nn.Module):
         scores = torch.einsum('BSD,BCD->BSC', text_rep, label_rep)  # (8, 249, 7)
         
         scores = torch.mean(scores, dim=1)  # (Batch, Labels)
-        
+                
         return scores
     
 class MLPScorer(nn.Module):
@@ -136,6 +136,7 @@ class HopfieldScorer(nn.Module):
 SCORER2OBJECT = {
     "weighted-dot": ScorerWeightedDot, 
     "simple": ScorerDot, 
+    "audio-token-dot": AudioTokenScorerDot,
     "mlp": MLPScorer,
     "hopfield": HopfieldScorer  # <-- Add reference here if you want
 }

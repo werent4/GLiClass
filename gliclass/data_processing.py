@@ -2,7 +2,7 @@ import random
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
-
+import numpy as np
 
 class GLiClassDataset(Dataset):
     def __init__(self, examples, tokenizer, max_length=512, 
@@ -10,7 +10,7 @@ class GLiClassDataset(Dataset):
                             architecture_type = 'uni-encoder',
                             prompt_first=False,
                             get_negatives = False,
-                            max_labels = 50,
+                            max_labels = 150,
                             labels_tokenizer=None,
                             shuffle_labels = True):
         self.tokenizer = tokenizer
@@ -53,11 +53,11 @@ class GLiClassDataset(Dataset):
         return prompt_texts
     
     def tokenize(self, texts):
-        tokenized_inputs = self.tokenizer(texts, truncation=True, max_length=self.max_length, padding="longest")
+        tokenized_inputs = self.tokenizer(texts, truncation=True, max_length=self.max_length, padding="longest", return_tensors="pt")
         return tokenized_inputs
 
     def tokenize_labels(self, labels):
-        tokenized_inputs = self.labels_tokenizer(labels, truncation=True, max_length=self.max_length, padding="longest")
+        tokenized_inputs = self.labels_tokenizer(labels, truncation=True, max_length=self.max_length, padding="longest", return_tensors="pt")
         return tokenized_inputs
     
     def tokenize_and_prepare_labels_for_uniencoder(self, example):
@@ -130,11 +130,16 @@ class GLiClassDataset(Dataset):
         class_texts = example['all_labels']
 
         tokenized_inputs = self.tokenize_labels(class_texts) # input_ids, attention_mask for classes
+
         label2idx = {label: idx for idx, label in enumerate(example['all_labels'])}
         tokenized_inputs['labels_mask'] = torch.ones(len(class_texts))
         tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
-        tokenized_inputs['labels_text'] =  example['all_labels']
-        tokenized_inputs['audio_input'] = torch.load(example['audio_features_path'], weights_only=False)
+
+        audio_data = torch.load(example['audio_features_path'], weights_only=False)
+        if isinstance(audio_data, np.ndarray):
+            tokenized_inputs['audio_input'] = torch.from_numpy(audio_data).float()
+        else:
+            tokenized_inputs['audio_input'] = audio_data.float()
         return tokenized_inputs
     
     def tokenize_and_prepare_labels_for_audioencoder(self, example):
@@ -208,7 +213,6 @@ def pad_2d_tensor(key_data):
 
     return padded_tensors
 
-import numpy as np
 class DataCollatorWithPadding:
     def __init__(self, device = 'cuda:0'):
         self.device = device
@@ -232,25 +236,12 @@ class DataCollatorWithPadding:
                     padded_batch[key] = key_data
                 else:
                     max_length = max(len(seq) for seq in key_data)
-                    padded_sequences = []
-                    for seq in key_data:
-                        padded_seq = seq + [0] * (max_length - len(seq))
-                        padded_sequences.append(padded_seq)
-                    try:
-                        padded_batch[key] = torch.tensor(padded_sequences)
-                    except Exception as e:
-                        with open('error_log.txt', 'a') as f:
-                            f.write(padded_sequences.__str__() + '\n')
-                        print(type(padded_sequences[-1]))
-                        print(type(padded_sequences[-1][0]))
-                        raise ValueError(f"Error converting {key} to tensor: {e}")
-                    
-
+                    padded_batch[key] = torch.tensor([seq + [0] * (max_length - len(seq)) 
+                                                        for seq in key_data])
             elif type(key_data[0]) in {int, float}:
                 padded_batch[key] = torch.tensor(key_data)
             elif isinstance(key_data[0], str):
                 padded_batch[key] = key_data
             else:
                 raise TypeError(f"Unsupported data type: {type(key_data[0])}")
-        
         return padded_batch
