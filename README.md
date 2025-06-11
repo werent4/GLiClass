@@ -139,7 +139,7 @@ Please, refer to the `train.py` script to set up your training from scratch or f
 ### 🛠️ How to Train GLiClassAudio
 ```json
 [
-  {"audio_features_path": "path/to/already/processed/file", "all_labels": ["sports", "science", "business"], "true_labels": ["sports"]},
+  {"audio_path": "path/to/raw/audio/array.pt", "sample_rate": 16000 "all_labels": ["sports", "science", "business"], "true_labels": ["sports"]},
   ...
 ]
 ```

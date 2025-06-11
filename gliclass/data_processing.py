@@ -1,5 +1,6 @@
 import random
 import torch
+from torchaudio.transforms import Resample
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 import numpy as np
@@ -12,9 +13,13 @@ class GLiClassDataset(Dataset):
                             get_negatives = False,
                             max_labels = 150,
                             labels_tokenizer=None,
+                            audio_features_extractor=None,
+                            sampling_rate = None,
+                            max_duration_s = None, # seconds
                             shuffle_labels = True):
         self.tokenizer = tokenizer
         self.labels_tokenizer = labels_tokenizer
+        self.audio_features_extractor = audio_features_extractor
         self.max_length = max_length
         self._data = examples
         self.problem_type = problem_type
@@ -25,6 +30,19 @@ class GLiClassDataset(Dataset):
         self.max_labels = max_labels
         self.shuffle_labels = shuffle_labels
         print('Total labels: ', len(self.dataset_labels))
+
+        if self.audio_features_extractor is not None:
+            if sampling_rate is None or max_duration_s is None:
+                raise ValueError(
+                    "When using audio_features_extractor you must specify "
+                    "sampling_rate и max_duration_s"
+                )
+            self.sampling_rate = sampling_rate
+            self.max_duration_s = max_duration_s
+            self.max_duration_samples = self.sampling_rate * self.max_duration_s
+            print(f"Audio parameters: sampling_rate={self.sampling_rate}, "
+                  f"max_duration={self.max_duration_s}s, "
+                  f"max_samples={self.max_duration_samples}")
 
     def collect_dataset_labels(self):
         dataset_labels = set()
@@ -51,6 +69,30 @@ class GLiClassDataset(Dataset):
             prompt_texts.append(label_tag)
         prompt_texts.append('<<SEP>>')
         return prompt_texts
+    
+    def prepare_audio(self, audio_array, audio_sr):
+        if isinstance(audio_array, np.ndarray):
+            audio_array = torch.from_numpy(audio_array).float()
+        elif isinstance(audio_array, torch.Tensor):
+            audio_array = audio_array.float()
+        else:
+            audio_array = torch.tensor(audio_array, dtype=torch.float32)
+
+        if audio_sr != self.sampling_rate:
+            audio_array = Resample(audio_sr, new_freq= self.sampling_rate)(audio_array)
+
+        if len(audio_array) > self.max_duration_samples:
+            audio_array = audio_array[:self.max_duration_samples]
+        elif len(audio_array) < self.max_duration_samples:
+            audio_array = np.pad(audio_array, (0, self.max_duration_samples - len(audio_array)), mode='constant')
+
+        audio_inputs = self.audio_features_extractor(
+            audio_array, 
+            sampling_rate=self.sampling_rate,
+            return_tensors="pt" 
+        )["input_values"].squeeze(0)
+
+        return audio_inputs
     
     def tokenize(self, texts):
         tokenized_inputs = self.tokenizer(texts, truncation=True, max_length=self.max_length, padding="longest", return_tensors="pt")
@@ -135,11 +177,13 @@ class GLiClassDataset(Dataset):
         tokenized_inputs['labels_mask'] = torch.ones(len(class_texts))
         tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
 
-        audio_data = torch.load(example['audio_features_path'], weights_only=False)
-        if isinstance(audio_data, np.ndarray):
-            tokenized_inputs['audio_input'] = torch.from_numpy(audio_data).float()
-        else:
-            tokenized_inputs['audio_input'] = audio_data.float()
+        audio_data = torch.load(example['audio_path'], weights_only=False)
+        audio_sr = example["sample_rate"]
+        tokenized_inputs['audio_input'] = self.prepare_audio(audio_data, audio_sr)
+        # if isinstance(audio_data, np.ndarray):
+        #     audio_data = torch.from_numpy(audio_data).float()
+        # else:
+        #     tokenized_inputs['audio_input'] = audio_data.float()
         return tokenized_inputs
     
     def tokenize_and_prepare_labels_for_audioencoder(self, example):
