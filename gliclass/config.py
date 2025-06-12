@@ -77,8 +77,6 @@ class GLiClassModelConfig(PretrainedConfig):
                 audio_model_config = CONFIG_MAPPING["wav2vec2"]()
 
             self.audio_model_config = audio_model_config
-            if audio_model_config.model_type != "wav2vec2":
-                raise ValueError(f"Currently only wav2vec2 is supported for audio model, but got {audio_model_config.model_type}")
         else:
             self.audio_model_config = None
         self.audio_model_name = audio_model_name
