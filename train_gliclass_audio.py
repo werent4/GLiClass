@@ -147,7 +147,7 @@ def main(args):
         save_steps = args.save_steps,
         save_total_limit=args.save_total_limit,
         dataloader_num_workers = args.num_workers,
-        logging_steps=100,
+        logging_steps=20,
         use_cpu = False,
         report_to="none",
         fp16=args.fp16,
@@ -181,14 +181,14 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, default= None)
-    parser.add_argument('--encoder_model_name', type=str, default = 'answerdotai/ModernBERT-base')
-    parser.add_argument('--audio_model_name', type=str, default = 'facebook/wav2vec2-base-960h') # 
-    parser.add_argument('--save_path', type=str, default = "models/test")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
+    parser.add_argument('--encoder_model_name', type=str, default = 'FacebookAI/roberta-base')
+    parser.add_argument('--audio_model_name', type=str, default = "laion/clap-htsat-fused") # 
+    parser.add_argument('--save_path', type=str, default = "models/test-rob")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
     parser.add_argument('--data_path', type=str, default =  "datasets/processed_dataset.json") # '/mnt/storage-werent4-1tb/datasets/gliclass-audio-datset/gliclass-audio-datset-final.json')
     parser.add_argument('--problem_type', type=str, default='multi_label_classification')
     parser.add_argument('--pooler_type', type=str, default='first')
-    parser.add_argument('--scorer_type', type=str, default='audio-token-dot')
-    parser.add_argument('--architecture_type', type=str, default='audio-bi-encoder')
+    parser.add_argument('--scorer_type', type=str, default='simple')
+    parser.add_argument('--architecture_type', type=str, default='audio-encoder')
     parser.add_argument('--normalize_features', type=bool, default=True)
     parser.add_argument('--extract_text_features', type=bool, default=False)
     parser.add_argument('--prompt_first', type=bool, default=True)
@@ -196,7 +196,7 @@ if __name__ == '__main__':
     parser.add_argument('--squeeze_layers', type=bool, default=False)
     parser.add_argument('--shuffle_labels', type=bool, default=True)
     parser.add_argument('--num_epochs', type=int, default=1)
-    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--encoder_lr', type=float, default=1e-5)
     parser.add_argument('--others_lr', type=float, default=1e-5)
@@ -208,11 +208,11 @@ if __name__ == '__main__':
     parser.add_argument('--focal_loss_gamma', type=float, default=2.5)
     parser.add_argument('--contrastive_loss_coef', type=float, default=0)
     parser.add_argument('--max_length', type=int, default=1024)
-    parser.add_argument('--sampling_rate', type= int, default= 16000)
+    parser.add_argument('--sampling_rate', type= int, default= 48000)
     parser.add_argument('--max_duration_s', type= int, default= 20, help="Max allowed duration of audio segment in seconds")
     parser.add_argument('--save_steps', type=int, default=720)
     parser.add_argument('--save_total_limit', type=int, default=3)
-    parser.add_argument('--num_workers', type=int, default=12)
+    parser.add_argument('--num_workers', type=int, default=1)
     parser.add_argument('--fp16', type=bool, default=False)
     args = parser.parse_args()
 

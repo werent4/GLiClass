@@ -8,7 +8,7 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 
-from transformers import PreTrainedModel, AutoConfig, AutoModel, Wav2Vec2Model
+from transformers import PreTrainedModel, AutoConfig, AutoModel, Wav2Vec2Model, ClapModel, AutoTokenizer
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import (logging)
@@ -639,84 +639,60 @@ class GLiClassAudio(GLiClassBaseModel):
             else:
                 return AutoModel.from_config(configs)
         self.encoder_model = initialize_encoder(config.encoder_config, config.encoder_model_name, from_pretrained)
-        self.audio_encoder = initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
+        self.audio_encoder = ClapModel.from_pretrained(config.audio_model_name).audio_model #initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
         self.audio_projector = AudioBiEncoderProjector(config)
 
     def pool_outputs(self, audio_encoder_outputs):
-        audio_embeddings = self.audio_projector(audio_encoder_outputs.last_hidden_state)
+        pooler_output = audio_encoder_outputs.pooler_output
+        audio_embeddings = self.audio_projector(pooler_output)#.unsqueeze(0))
         audio_embeddings = self.dropout(audio_embeddings)
         if self.config.normalize_features:
             audio_embeddings = nn.functional.normalize(audio_embeddings, p=2, dim=-1, eps=self.epsilon)
         return audio_embeddings
     
-    def encode_audio(self, input_values):
-        outputs = self.audio_encoder(input_values)
+    def encode_audio(self, input_values, is_longer):
+        outputs = self.audio_encoder(
+            input_features=input_values,
+            is_longer=is_longer
+        )
         audio_embeddings = self.pool_outputs(outputs)
         return audio_embeddings
     
     def insert_audio_embeddings(self, inputs_embeds, input_ids, attention_mask, audio_embeddings):
+        inputs_embeds = inputs_embeds.squeeze(1)
+        input_ids = input_ids.squeeze(1)
+        attention_mask = attention_mask.squeeze(1)
+
         audio_token_id = self.config.audio_token_index
         audio_mask = input_ids == audio_token_id
 
         batch_size = input_ids.shape[0]
-        audio_seq_len = audio_embeddings.shape[1]
-
-        new_inputs_embeds = []
-        new_attention_masks = []
 
         for batch_idx in range(batch_size):
             audio_positions = torch.where(audio_mask[batch_idx])[0]
-
             if len(audio_positions) == 0:
                 raise ValueError(f"No audio token found in batch {batch_idx}. Please check your input data.")
             
-            audio_pos = audio_positions[0]
+            audio_pos = audio_positions
+            inputs_embeds[batch_idx, audio_pos] = audio_embeddings[batch_idx]
+        return inputs_embeds, attention_mask, input_ids
 
-            before_audio = inputs_embeds[batch_idx, :audio_pos]
-            after_audio = inputs_embeds[batch_idx, audio_pos+1:]
-            audio_emb = audio_embeddings[batch_idx]
+    def forward(
+        self,
+        input_ids,
+        attention_mask, 
+        input_audio_features, 
+        is_longer,
+        labels=None,
+        **kwargs
+    ):
 
-            new_sequence = torch.cat([before_audio, audio_emb, after_audio], dim=0)
-
-            before_mask = attention_mask[batch_idx, :audio_pos]
-            after_mask = attention_mask[batch_idx, audio_pos+1:]
-            audio_attention = torch.ones(audio_seq_len, device=attention_mask.device, dtype=attention_mask.dtype)
-            new_mask = torch.cat([before_mask, audio_attention, after_mask], dim=0)
-
-            new_inputs_embeds.append(new_sequence)
-            new_attention_masks.append(new_mask)
-
-
-        max_len = max(emb.shape[0] for emb in new_inputs_embeds)
-        padded_embeds = []
-        padded_masks = []
-
-        for emb, mask in zip(new_inputs_embeds, new_attention_masks):
-            emb_pad_len = max_len - emb.shape[0]
-            mask_pad_len = max_len - mask.shape[0]
-
-            if emb_pad_len > 0:
-                emb_padding = torch.zeros(emb_pad_len, emb.shape[1], device=emb.device, dtype=emb.dtype)
-                emb = torch.cat([emb, emb_padding], dim=0)
-
-            if mask_pad_len > 0:
-                mask_padding = torch.zeros(mask_pad_len, device=mask.device, dtype=mask.dtype)
-                mask = torch.cat([mask, mask_padding], dim=0)
-
-            padded_embeds.append(emb)
-            padded_masks.append(mask)
-
-
-        return torch.stack(padded_embeds), torch.stack(padded_masks) #inputs_embeds
-
-    def forward(self, input_ids, attention_mask, audio_input, labels=None, **kwargs):
-
-        audio_embeddings = self.encode_audio(audio_input)  # [batch, audio_seq_len, hidden]
+        audio_embeddings = self.encode_audio(input_audio_features, is_longer)  # [batch, audio_seq_len, hidden]
 
         embedding_layer = self.encoder_model.get_input_embeddings()
         inputs_embeds = embedding_layer(input_ids)
 
-        inputs_embeds, attention_mask = self.insert_audio_embeddings(inputs_embeds, input_ids, attention_mask, audio_embeddings)
+        inputs_embeds, attention_mask, input_ids = self.insert_audio_embeddings(inputs_embeds, input_ids, attention_mask, audio_embeddings)
 
         outputs = self.encoder_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
         classes_embedding, classes_embedding_mask, audio_final_emb, audio_mask = self._extract_class_features(outputs[0], input_ids, attention_mask)

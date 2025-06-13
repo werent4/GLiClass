@@ -90,9 +90,9 @@ class GLiClassDataset(Dataset):
             audio_array, 
             sampling_rate=self.sampling_rate,
             return_tensors="pt" 
-        )["input_values"].squeeze(0)
+        )
 
-        return audio_inputs
+        return audio_inputs["input_features"].squeeze(0), audio_inputs["is_longer"] 
     
     def tokenize(self, texts):
         tokenized_inputs = self.tokenizer(texts, truncation=True, max_length=self.max_length, padding="longest", return_tensors="pt")
@@ -179,11 +179,7 @@ class GLiClassDataset(Dataset):
 
         audio_data = torch.load(example['audio_path'], weights_only=False)
         audio_sr = example["sample_rate"]
-        tokenized_inputs['audio_input'] = self.prepare_audio(audio_data, audio_sr)
-        # if isinstance(audio_data, np.ndarray):
-        #     audio_data = torch.from_numpy(audio_data).float()
-        # else:
-        #     tokenized_inputs['audio_input'] = audio_data.float()
+        tokenized_inputs["input_audio_features"], tokenized_inputs["is_longer"]  = self.prepare_audio(audio_data, audio_sr)
         return tokenized_inputs
     
     def tokenize_and_prepare_labels_for_audioencoder(self, example):
@@ -198,7 +194,10 @@ class GLiClassDataset(Dataset):
         tokenized_inputs = self.tokenize(input_text)
         tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
         tokenized_inputs['labels_text'] =  example['all_labels']
-        tokenized_inputs['audio_input'] = torch.load(example['audio_features_path'])
+
+        audio_data = torch.load(example['audio_path'], weights_only=False)
+        audio_sr = example["sample_rate"]
+        tokenized_inputs["input_audio_features"], tokenized_inputs["is_longer"]  = self.prepare_audio(audio_data, audio_sr)
         return tokenized_inputs
 
     def __len__(self):
@@ -272,6 +271,8 @@ class DataCollatorWithPadding:
                     padded_batch[key] = pad_sequence(key_data, batch_first=True)
                 elif key_data[0].dim() == 2: 
                     padded_batch[key] = pad_2d_tensor(key_data)
+                elif key_data[0].dim() == 3: 
+                    padded_batch[key] = torch.stack(key_data) 
             elif isinstance(key_data[0], list):
                 data_el = "string"
                 if len(key_data[0]):
