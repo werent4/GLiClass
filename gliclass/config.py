@@ -28,6 +28,7 @@ class GLiClassModelConfig(PretrainedConfig):
         ignore_index=-100,
         hidden_size=None,
         projector_hidden_act="gelu",
+        projection_dim = 512,
         vocab_size=None,
         problem_type='single_label_classification',
         max_num_classes=25,
@@ -45,6 +46,7 @@ class GLiClassModelConfig(PretrainedConfig):
         prompt_first = False,
         squeeze_layers = False,
         embed_class_token = True, 
+        init_from_larger_clap = True,
         **kwargs,
     ):
         if isinstance(encoder_config, dict):
@@ -116,9 +118,14 @@ class GLiClassModelConfig(PretrainedConfig):
             self.audio_token_index = self.vocab_size + 2
         else:
             self.audio_token_index = audio_token_index
-
+        
+        if architecture_type not in {"audio-bi-encoder"} and init_from_larger_clap:
+            raise ValueError(f"Cannot init {architecture_type} projection layers from clap. Please ensure you are using audio based arch")
+        
+        self.init_from_larger_clap = init_from_larger_clap
         self.ignore_index = ignore_index
         self.projector_hidden_act = projector_hidden_act
+        self.projection_dim = projection_dim
         self.problem_type = problem_type
         self.max_num_classes = max_num_classes
         self.initializer_range=initializer_range

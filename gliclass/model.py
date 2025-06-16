@@ -15,7 +15,7 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import (logging)
 from transformers.models.auto import AutoModel
 from .config import GLiClassModelConfig
-from .layers import FeaturesProjector, LstmSeq2SeqEncoder, BiEncoderProjector, LayerwiseAttention, AudioBiEncoderProjector
+from .layers import FeaturesProjector, LstmSeq2SeqEncoder, BiEncoderProjector, LayerwiseAttention, AudioBiEncoderProjector, ClapProjectionLayer
 from .poolings import POOLING2OBJECT
 from .scorers import SCORER2OBJECT
 from .loss_functions import focal_loss_with_logits, sequence_contrastive_loss
@@ -654,6 +654,7 @@ class GLiClassAudio(GLiClassBaseModel):
                 return AutoModel.from_pretrained(model_name)
             else:
                 return AutoModel.from_config(configs)
+            
         if from_pretrained:
             self.encoder_model = ClapTextModel.from_pretrained(config.encoder_model_name)#initialize_encoder(config.encoder_config, config.encoder_model_name, from_pretrained)
             self.audio_encoder = ClapAudioModel.from_pretrained(config.audio_model_name,) #initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
@@ -744,7 +745,7 @@ class GLiClassAudio(GLiClassBaseModel):
                             class_embeddings=classes_embedding)
 
 class GLiClassAudioBiEncoder(GLiClassBaseModel):
-    def __init__(self, config: GLiClassModelConfig, from_pretrained=False):
+    def __init__(self, config: GLiClassModelConfig, from_pretrained=False, init_from_larger_clap= True):
         super().__init__(config)
         if config.encoder_config is None:
             if config.encoder_model_name is None:
@@ -761,19 +762,51 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
                 return AutoModel.from_pretrained(model_name)
             else:
                 return AutoModel.from_config(configs)
-        self.encoder_model = initialize_encoder(config.encoder_config, config.encoder_model_name, from_pretrained)
-        self.audio_encoder = initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
-        self.audio_biencoder_projector = AudioBiEncoderProjector(config)
+            
+        if from_pretrained:
+            self.encoder_model = ClapTextModel.from_pretrained(config.encoder_model_name)#initialize_encoder(config.encoder_config, config.encoder_model_name, from_pretrained)
+            self.audio_encoder = ClapAudioModel.from_pretrained(config.audio_model_name,) #initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
+        else:
+            self.encoder_model = ClapTextModel(config.encoder_config)
+            self.audio_encoder = ClapAudioModel(config.audio_model_config)
+
+        if from_pretrained and config.init_from_larger_clap:
+            self.audio_projector = ClapProjectionLayer(config, config.audio_model_config.hidden_size)
+            self.text_projector = ClapProjectionLayer(config, config.encoder_config.hidden_size)
+            self._init_from_larger_clap()
+        elif not from_pretrained and config.init_from_larger_clap:
+            self.audio_projector = ClapProjectionLayer(config, config.audio_model_config.hidden_size)
+            self.text_projector = ClapProjectionLayer(config, config.encoder_config.hidden_size)
+            print("initialozed projectors from config.init_from_larger_clap")
+        else:
+            self.audio_projector = AudioBiEncoderProjector(config)
+            print("Used default init for audio_projection and text_projection")
+
+    def _init_from_larger_clap(self, larger_clap_model_name="laion/larger_clap_general"):
+            from transformers import ClapModel
+            larger_clap = ClapModel.from_pretrained(larger_clap_model_name)
+
+            if hasattr(larger_clap, 'audio_projection'):
+                self.audio_projector.load_from_clap_projection(larger_clap.audio_projection)
+                print("audio_projection layer init from clap")
+
+            if hasattr(larger_clap, 'text_projection'):
+                self.text_projector.load_from_clap_projection(larger_clap.text_projection)
+                print("text_projection layer init from clap")
 
     def pool_outputs(self, audio_encoder_outputs):
-        audio_embeddings = self.audio_biencoder_projector(audio_encoder_outputs.last_hidden_state)
+        pooler_output = audio_encoder_outputs.pooler_output
+        audio_embeddings = self.audio_projector(pooler_output)#.unsqueeze(0))
         audio_embeddings = self.dropout(audio_embeddings)
         if self.config.normalize_features:
             audio_embeddings = nn.functional.normalize(audio_embeddings, p=2, dim=-1, eps=self.epsilon)
         return audio_embeddings
 
-    def encode_audio(self, input_values):
-        outputs = self.audio_encoder(input_values)
+    def encode_audio(self, input_values, is_longer):
+        outputs = self.audio_encoder(
+            input_features=input_values,
+            is_longer=is_longer
+        )
         audio_embeddings = self.pool_outputs(outputs)
         return audio_embeddings
     
@@ -800,7 +833,7 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
             class_embeddings = self.pooler(outputs[0])
             class_embeddings = class_embeddings.reshape(batch_size, num_classes, -1)
         class_embeddings = self.text_projector(class_embeddings)
-        class_embeddings = self.classes_projector(class_embeddings)
+        # class_embeddings = self.classes_projector(class_embeddings)
         if self.config.normalize_features:
             class_embeddings = nn.functional.normalize(class_embeddings, p=2, dim=-1, eps=self.epsilon)
         return class_embeddings
@@ -809,7 +842,8 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
             self,
             input_ids: Optional[torch.Tensor] = None, # classes encoded with encoder class_input_ids
             attention_mask: Optional[torch.Tensor] = None, # classes AM encoded with encoder class_attention_mask
-            audio_input: Optional[torch.Tensor] = None,
+            input_audio_features: Optional[torch.Tensor] = None,
+            is_longer: Optional[bool] = None,
             labels_mask: Optional[torch.Tensor] = None,
             labels: Optional[torch.Tensor] = None,
             output_text_embeddings: Optional[bool] = None,
@@ -817,7 +851,7 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
             return_dict: Optional[bool] = True,
             **kwargs
         ):
-        audio_embeddings = self.encode_audio(audio_input)
+        audio_embeddings = self.encode_audio(input_audio_features, is_longer)
         class_embeddings = self.encode_classes(input_ids, attention_mask, labels_mask)
         logits = self.scorer(audio_embeddings, class_embeddings) * self.logit_scale.to(class_embeddings.device)
 
@@ -838,7 +872,7 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
 
 
 class GLiClassModel(GLiClassPreTrainedModel):
-    def __init__(self, config, from_pretrained=False):
+    def __init__(self, config, from_pretrained=False, init_from_larger_clap= False):
         super().__init__(config)
         if config.architecture_type == 'uni-encoder':
             self.model = GLiClassUniEncoder(config, from_pretrained)
@@ -851,7 +885,7 @@ class GLiClassModel(GLiClassPreTrainedModel):
         elif config.architecture_type == 'audio-encoder':
             self.model = GLiClassAudio(config, from_pretrained)
         elif config.architecture_type == 'audio-bi-encoder':
-            self.model = GLiClassAudioBiEncoder(config, from_pretrained)
+            self.model = GLiClassAudioBiEncoder(config, from_pretrained, init_from_larger_clap)
         self.post_init()
 
     def get_input_embeddings(self):

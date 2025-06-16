@@ -86,6 +86,34 @@ class AudioBiEncoderProjector(nn.Module):
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
+class ClapProjectionLayer(nn.Module):
+    def __init__(self, config, hidden_size):
+        super().__init__()
+        print("hidden_size: ", hidden_size)
+        self.config = config
+        projection_dim = config.projection_dim
+
+        self.linear1 = nn.Linear(hidden_size, projection_dim)
+        self.activation = ACT2FN[config.projector_hidden_act]
+        self.linear2 = nn.Linear(projection_dim, projection_dim)
+
+    def forward(self, hidden_states):
+        hidden_states = self.linear1(hidden_states)
+        hidden_states = self.activation(hidden_states)
+        hidden_states = self.linear2(hidden_states)
+        return hidden_states
+    
+    def load_from_clap_projection(self, clap_projection_layer):
+        if hasattr(clap_projection_layer, 'linear1'):
+            self.linear1.weight.data.copy_(clap_projection_layer.linear1.weight.data)
+            if clap_projection_layer.linear1.bias is not None and self.linear1.bias is not None:
+                self.linear1.bias.data.copy_(clap_projection_layer.linear1.bias.data)
+        
+        if hasattr(clap_projection_layer, 'linear2'):
+            self.linear2.weight.data.copy_(clap_projection_layer.linear2.weight.data)
+            if clap_projection_layer.linear2.bias is not None and self.linear2.bias is not None:
+                self.linear2.bias.data.copy_(clap_projection_layer.linear2.bias.data)
+
 # Copied from transformers.models.deberta.modeling_deberta.DropoutContext
 class DropoutContext(object):
     def __init__(self):
