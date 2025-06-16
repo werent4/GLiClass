@@ -1,9 +1,14 @@
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
+from transformers.models.clap.configuration_clap import ClapTextConfig, ClapAudioConfig
 from transformers.models.auto import CONFIG_MAPPING
 logger = logging.get_logger(__name__)
 
+CONFIG_MAPPING['clap_text_model'] = ClapTextConfig
+CONFIG_MAPPING['clap_audio_model'] = ClapAudioConfig
+
+# print(CONFIG_MAPPING)
 
 class GLiClassModelConfig(PretrainedConfig):
     model_type = "GLiClass"
@@ -46,7 +51,10 @@ class GLiClassModelConfig(PretrainedConfig):
             encoder_config["model_type"] = (encoder_config["model_type"] 
                                                 if "model_type" in encoder_config 
                                                 else "deberta-v2")
-            encoder_config = CONFIG_MAPPING[encoder_config["model_type"]](**encoder_config)
+            if encoder_config["model_type"] == "clap_text_model":
+                encoder_config = ClapTextConfig(**encoder_config)
+            else:
+                encoder_config = CONFIG_MAPPING[encoder_config["model_type"]](**encoder_config)
         elif encoder_config is None:
             encoder_config = CONFIG_MAPPING["deberta-v2"]()
 
@@ -72,7 +80,10 @@ class GLiClassModelConfig(PretrainedConfig):
                 audio_model_config["model_type"] = (audio_model_config["model_type"] 
                                                     if "model_type" in audio_model_config 
                                                     else "wav2vec2")
-                audio_model_config = CONFIG_MAPPING[audio_model_config["model_type"]](**audio_model_config)
+                if audio_model_config["model_type"] == "clap_audio_model":
+                    audio_model_config = ClapAudioConfig(**audio_model_config)
+                else:
+                    audio_model_config = CONFIG_MAPPING[audio_model_config["model_type"]](**audio_model_config)
             elif audio_model_config is None:
                 audio_model_config = CONFIG_MAPPING["wav2vec2"]()
 

@@ -9,6 +9,7 @@ import torch.utils.checkpoint
 from torch import nn
 
 from transformers import PreTrainedModel, AutoConfig, AutoModel, Wav2Vec2Model, ClapModel, AutoTokenizer
+from transformers.models.clap.modeling_clap import ClapAudioModel, ClapTextModel
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.utils import (logging)
@@ -70,20 +71,35 @@ class GLiClassPreTrainedModel(PreTrainedModel):
         )
 
         if hasattr(module, "class_embedding"):
-            module.class_embedding.data.normal_(mean=0.0, std=std)
+            # module.class_embedding.data.normal_(mean=0.0, std=std)
+            nn.init.xavier_uniform_(module.class_embedding.data)
 
         if isinstance(module, (nn.Linear, nn.Conv2d)):
-            module.weight.data.normal_(mean=0.0, std=std)
+            # module.weight.data.normal_(mean=0.0, std=std)
+            # if module.bias is not None:
+            #     module.bias.data.zero_()
+            nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 module.bias.data.zero_()
+
         elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
+            # module.weight.data.normal_(mean=0.0, std=std)
+            # if module.padding_idx is not None:
+            #     module.weight.data[module.padding_idx].zero_()
+            nn.init.xavier_uniform_(module.weight.data)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+
+
         elif isinstance(module, nn.LSTM):
+            # for name, param in module.named_parameters():
+            #     if 'weight_ih' in name or 'weight_hh' in name:
+            #         nn.init.normal_(param.data, mean=0.0, std=std)
+            #     elif 'bias' in name:
+            #         param.data.zero_()
             for name, param in module.named_parameters():
                 if 'weight_ih' in name or 'weight_hh' in name:
-                    nn.init.normal_(param.data, mean=0.0, std=std)
+                    nn.init.xavier_uniform_(param.data) 
                 elif 'bias' in name:
                     param.data.zero_()
     @property
@@ -638,8 +654,12 @@ class GLiClassAudio(GLiClassBaseModel):
                 return AutoModel.from_pretrained(model_name)
             else:
                 return AutoModel.from_config(configs)
-        self.encoder_model = initialize_encoder(config.encoder_config, config.encoder_model_name, from_pretrained)
-        self.audio_encoder = ClapModel.from_pretrained(config.audio_model_name).audio_model #initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
+        if from_pretrained:
+            self.encoder_model = ClapTextModel.from_pretrained(config.encoder_model_name)#initialize_encoder(config.encoder_config, config.encoder_model_name, from_pretrained)
+            self.audio_encoder = ClapAudioModel.from_pretrained(config.audio_model_name,) #initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
+        else:
+            self.encoder_model = ClapTextModel(config.encoder_config)
+            self.audio_encoder = ClapAudioModel(config.audio_model_config)
         self.audio_projector = AudioBiEncoderProjector(config)
 
     def pool_outputs(self, audio_encoder_outputs):
