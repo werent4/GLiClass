@@ -4,6 +4,8 @@ from torchaudio.transforms import Resample
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 import numpy as np
+from .augments import augment_audio
+
 
 class GLiClassDataset(Dataset):
     def __init__(self, examples, tokenizer, max_length=512, 
@@ -77,6 +79,9 @@ class GLiClassDataset(Dataset):
             audio_array = audio_array.float()
         else:
             audio_array = torch.tensor(audio_array, dtype=torch.float32)
+
+        # if random.random() > 0.3:
+        #     audio_array = augment_audio(audio_array, audio_sr)
 
         if audio_sr != self.sampling_rate:
             audio_array = Resample(audio_sr, new_freq= self.sampling_rate)(audio_array)
