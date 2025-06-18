@@ -782,6 +782,9 @@ class GLiClassAudioBiEncoder(GLiClassBaseModel):
             self.audio_projector = AudioBiEncoderProjector(config)
             print("Used default init for audio_projection and text_projection")
 
+        # for param in self.audio_projector.parameters():
+        #     param.requires_grad = False
+
     def _init_from_larger_clap(self, larger_clap_model_name="laion/larger_clap_general"):
             from transformers import ClapModel
             larger_clap = ClapModel.from_pretrained(larger_clap_model_name)

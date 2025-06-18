@@ -13,6 +13,7 @@ import transformers
 from transformers import ZeroShotClassificationPipeline as TransformersClassificationPipeline
 from .utils import default_f1_reward
 from .pipeline import ZeroShotClassificationPipeline
+from collections import defaultdict
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -20,6 +21,8 @@ class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adamw_torch")
     others_lr: Optional[float] = None
     others_weight_decay: Optional[float] = 0.0
+    audio_lr: Optional[float] = None 
+    audio_weight_decay: Optional[float] = 0.0
 
 class Trainer(transformers.Trainer):
     def training_step(self, model, inputs, *args, **kwargs) -> torch.Tensor:
@@ -53,6 +56,11 @@ class Trainer(transformers.Trainer):
 
             with self.compute_loss_context_manager():
                 loss = self.compute_loss(model, inputs)
+
+            if hasattr(self, '_step_counter'):
+                self._step_counter += 1
+            else:
+                self._step_counter = 1
 
             del inputs
             torch.cuda.empty_cache()
@@ -139,12 +147,6 @@ class Trainer(transformers.Trainer):
             return (None, None, None)
         
     def create_optimizer(self):
-        """
-        Setup the optimizer.
-
-        We provide a reasonable default that works well. If you want to use something else, you can pass a tuple in the
-        Trainer's init through `optimizers`, or subclass and override this method in a subclass.
-        """
         if is_sagemaker_mp_enabled():
             return super().create_optimizer()
 
@@ -153,36 +155,62 @@ class Trainer(transformers.Trainer):
         if self.optimizer is None:
             decay_parameters = get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS)
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
-            if self.args.others_lr is not None:
-                encoder_parameters = [name for name, _ in opt_model.named_parameters() if "encoder" in name]
-                optimizer_grouped_parameters = [
+            
+            audio_encoder_parameters = [name for name, _ in opt_model.named_parameters() if "audio_encoder" in name]
+            text_encoder_parameters = [name for name, _ in opt_model.named_parameters() if "encoder" in name and "audio_encoder" not in name]
+            optimizer_grouped_parameters = []
+            # text encoder
+            optimizer_grouped_parameters.extend([
                     {
                         "params": [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in encoder_parameters and p.requires_grad)
+                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and n in text_encoder_parameters and n not in audio_encoder_parameters and p.requires_grad)
+                        ],
+                        "weight_decay": self.args.weight_decay,
+                    },
+                    {
+                        "params": [
+                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n in text_encoder_parameters and n not in audio_encoder_parameters and p.requires_grad)
+                        ],
+                        "weight_decay": 0.0,
+                    },
+            ])
+            
+            # audio encoder
+            if self.args.audio_lr is not None:
+                 optimizer_grouped_parameters.extend([{
+                        "params": [
+                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in text_encoder_parameters and n in audio_encoder_parameters and p.requires_grad)
+                        ],
+                        "weight_decay": self.args.others_weight_decay,
+                        "lr": self.args.audio_lr,
+                    },
+                    {
+                        "params": [
+                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n not in text_encoder_parameters and n in audio_encoder_parameters and p.requires_grad)
+                        ],
+                        "weight_decay": 0.0,
+                        "lr": self.args.audio_lr,
+                    }
+                ])
+            
+            # Others
+            if self.args.others_lr is not None:
+                optimizer_grouped_parameters.extend([
+                    {
+                        "params": [
+                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in text_encoder_parameters and n not in audio_encoder_parameters and p.requires_grad)
                         ],
                         "weight_decay": self.args.others_weight_decay,
                         "lr": self.args.others_lr,
                     },
                     {
                         "params": [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n not in encoder_parameters and p.requires_grad)
+                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n not in text_encoder_parameters and n not in audio_encoder_parameters and p.requires_grad)
                         ],
                         "weight_decay": 0.0,
                         "lr": self.args.others_lr,
                     },
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and n in encoder_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": self.args.weight_decay,
-                    },
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n in encoder_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": 0.0,
-                    },
-                ]
+                ])
             else:
                 optimizer_grouped_parameters = [
                     {
@@ -505,3 +533,111 @@ class RLTrainer(Trainer):
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(output_dir)
         print(f"Checkpoint saved to {output_dir}")
+
+class AnalysisTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gradient_stats = {}
+        self.activation_stats = {}
+        self.hooks = []
+        self.step_count = 0
+
+    def setup_hooks(self):
+        self._count_component_parameters()
+        def param_gradient_hook(component_name):
+            def hook(grad):
+                if grad is not None:
+                    grad_norm = torch.norm(grad).item()
+                    grad_mean = torch.mean(grad).item()
+                    if grad.numel() > 1:
+                        grad_std = torch.std(grad, unbiased=False).item()
+                    else:
+                        grad_std = 0.0
+            
+                    
+                    if component_name not in self.gradient_stats:
+                        self.gradient_stats[component_name] = {
+                            'norms': [], 'means': [], 'stds': []
+                        }
+                    
+                    self.gradient_stats[component_name]['norms'].append(grad_norm)
+                    self.gradient_stats[component_name]['means'].append(grad_mean)
+                    self.gradient_stats[component_name]['stds'].append(grad_std)
+                return grad
+            return hook
+
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                component = self._get_component_name(name)
+                handle = param.register_hook(param_gradient_hook(component))
+                self.hooks.append(handle)
+
+    def _get_component_name(self, param_name):
+        if 'audio_encoder' in param_name:
+            return 'audio_encoder'
+        elif 'audio_projector' in param_name:
+            return 'audio_projector'
+        elif 'text_projector' in param_name:
+            return 'text_projector'
+        elif 'encoder_model' in param_name or ('encoder' in param_name and 'audio_encoder' not in param_name):
+            return 'text_encoder'
+        elif 'scorer' in param_name:
+            return 'scorer'
+        else:
+            return 'others'
+
+    def _count_component_parameters(self):
+        self.component_param_counts = {
+            'audio_encoder': 0,
+            'audio_projector': 0, 
+            'text_projector': 0,
+            'text_encoder': 0,
+            'scorer': 0,
+            'others': 0
+        }
+        
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                component = self._get_component_name(name)
+                self.component_param_counts[component] += param.numel()
+
+        print("Component parameter counts:")
+        for component, count in self.component_param_counts.items():
+            if count > 0:
+                print(f"  {component}: {count:,} parameters")
+                self.log({f"params/{component}_count": count})
+        
+    def training_step(self, model, inputs, *args, **kwargs):        
+        loss = super().training_step(model, inputs, *args, **kwargs)
+        self.step_count += 1
+
+        if self.step_count % 100 == 0:
+            self.log_and_clear_stats()
+            
+        return loss
+
+    def log_and_clear_stats(self):
+        for component, stats in self.gradient_stats.items():
+            if stats['norms']:
+                total_norm = sum(stats['norms'])
+                avg_mean = sum(stats['means']) / len(stats['means'])
+                avg_std = sum(stats['stds']) / len(stats['stds'])
+                
+                self.log({f"grad/{component}_norm": total_norm})
+                self.log({f"grad/{component}_mean": avg_mean})
+                self.log({f"grad/{component}_std": avg_std})
+
+                param_count = self.component_param_counts.get(component, 1)
+                if param_count > 0:
+                    normalized_norm = total_norm / param_count
+                    self.log({f"grad/{component}_norm_per_param": normalized_norm})
+                    
+                    # sqrt_normalized_norm = total_norm / (param_count ** 0.5)
+                    # self.log({f"grad/{component}_norm_per_sqrt_param": sqrt_normalized_norm})
+
+        self.gradient_stats.clear()
+
+    def cleanup_hooks(self):
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks.clear()

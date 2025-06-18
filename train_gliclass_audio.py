@@ -14,7 +14,7 @@ random.seed(42)
 import torch
 
 from gliclass import GLiClassModelConfig, GLiClassModel
-from gliclass.training import TrainingArguments, Trainer
+from gliclass.training import TrainingArguments, Trainer, AnalysisTrainer
 from gliclass.data_processing import DataCollatorWithPadding, GLiClassDataset
 
 def compute_metrics(p):
@@ -136,6 +136,8 @@ def main(args):
         output_dir=args.save_path,
         learning_rate=args.encoder_lr,
         weight_decay=args.encoder_weight_decay,
+        audio_lr = args.audio_lr,
+        audio_weight_decay = args.audio_weight_decay,
         others_lr=args.others_lr,
         others_weight_decay=args.others_weight_decay,
         lr_scheduler_type=args.lr_scheduler_type,
@@ -154,7 +156,7 @@ def main(args):
         fp16=args.fp16,
         )
 
-    trainer = Trainer(
+    trainer = AnalysisTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -163,6 +165,7 @@ def main(args):
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
+    trainer.setup_hooks()
     trainer.train()
 
     eval_results = trainer.evaluate()
@@ -184,8 +187,8 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default= None)
     parser.add_argument('--encoder_model_name', type=str, default = 'werent4/larger_clap_general_text_model')
     parser.add_argument('--audio_model_name', type=str, default = "werent4/larger_clap_general_audio_model") # 
-    parser.add_argument('--save_path', type=str, default = "models/gliclass-audio-projections-clap-base")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
-    parser.add_argument('--data_path', type=str, default =  "/mnt/storage-werent4-1tb/generic-dataset/gliclass_audio_uniform_example_level.json")
+    parser.add_argument('--save_path', type=str, default = "models/gliclas-audio-check-grads-acts")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
+    parser.add_argument('--data_path', type=str, default =  "/mnt/storage-werent4-1tb/generic-dataset/gliclass_audio_uniform_dataset_level.json")
     parser.add_argument('--problem_type', type=str, default='multi_label_classification')
     parser.add_argument('--pooler_type', type=str, default='first')
     parser.add_argument('--scorer_type', type=str, default='simple')
@@ -196,22 +199,24 @@ if __name__ == '__main__':
     parser.add_argument('--use_lstm', type=bool, default=False)
     parser.add_argument('--squeeze_layers', type=bool, default=False)
     parser.add_argument('--shuffle_labels', type=bool, default=True)
-    parser.add_argument('--num_epochs', type=int, default=3) #££££££££££££££
+    parser.add_argument('--num_epochs', type=int, default=2) #££££££££££££££
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
-    parser.add_argument('--encoder_lr', type=float, default=3e-5)
-    parser.add_argument('--others_lr', type=float, default=3e-5)
-    parser.add_argument('--encoder_weight_decay', type=float, default=0.02)
-    parser.add_argument('--others_weight_decay', type=float, default=0.02)
+    parser.add_argument('--encoder_lr', type=float, default=1e-5)
+    parser.add_argument('--audio_lr', type=float, default=4e-5)
+    parser.add_argument('--others_lr', type=float, default=1e-5)
+    parser.add_argument('--encoder_weight_decay', type=float, default=0.015)
+    parser.add_argument('--audio_weight_decay', type=float, default=0.015)
+    parser.add_argument('--others_weight_decay', type=float, default=0.015)
     parser.add_argument('--warmup_ratio', type=float, default=0.05)
     parser.add_argument('--lr_scheduler_type', type=str, default='cosine')
-    parser.add_argument('--focal_loss_alpha', type=float, default=0.85)
+    parser.add_argument('--focal_loss_alpha', type=float, default=0.9)
     parser.add_argument('--focal_loss_gamma', type=float, default=2.5)
     parser.add_argument('--contrastive_loss_coef', type=float, default=0)
     parser.add_argument('--max_length', type=int, default=1024)
     parser.add_argument('--sampling_rate', type= int, default= 48000)
     parser.add_argument('--max_duration_s', type= int, default= 20, help="Max allowed duration of audio segment in seconds")
-    parser.add_argument('--save_steps', type=int, default=500)
+    parser.add_argument('--save_steps', type=int, default=2000)
     parser.add_argument('--save_total_limit', type=int, default=3)
     parser.add_argument('--num_workers', type=int, default=6)
     parser.add_argument('--fp16', type=bool, default=False)

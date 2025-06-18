@@ -27,7 +27,7 @@ class GLiClassModelConfig(PretrainedConfig):
         audio_token_index=-1,
         ignore_index=-100,
         hidden_size=None,
-        projector_hidden_act="gelu",
+        projector_hidden_act="relu",
         projection_dim = 512,
         vocab_size=None,
         problem_type='single_label_classification',
