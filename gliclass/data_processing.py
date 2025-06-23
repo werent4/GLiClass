@@ -86,17 +86,15 @@ class GLiClassDataset(Dataset):
         if audio_sr != self.sampling_rate:
             audio_array = Resample(audio_sr, new_freq= self.sampling_rate)(audio_array)
 
-        if len(audio_array) > self.max_duration_samples:
-            audio_array = audio_array[:self.max_duration_samples]
-        elif len(audio_array) < self.max_duration_samples:
-            audio_array = np.pad(audio_array, (0, self.max_duration_samples - len(audio_array)), mode='constant')
-
         audio_inputs = self.audio_features_extractor(
             audio_array, 
             sampling_rate=self.sampling_rate,
-            return_tensors="pt" 
+            return_tensors="pt",
+            padding="longest",
+            truncation=True, 
+            max_length=self.max_duration_samples  
         )
-        return audio_inputs["input_features"].squeeze(0), audio_inputs["is_longer"] 
+        return audio_inputs["input_values"], audio_inputs["attention_mask"] 
     
     def tokenize(self, texts):
         tokenized_inputs = self.tokenizer(texts, truncation=True, max_length=self.max_length, padding="longest", return_tensors="pt")
@@ -171,6 +169,7 @@ class GLiClassDataset(Dataset):
         return tokenized_inputs
     
     def tokenize_and_prepare_labels_for_audiobiencoder(self, example):
+        raise NotImplementedError("This arch is not implemented yet")
         if self.shuffle_labels:
             random.shuffle(example['all_labels'])
         class_texts = example['all_labels']
@@ -201,7 +200,7 @@ class GLiClassDataset(Dataset):
 
         audio_data = torch.load(example['audio_path'], weights_only=False)
         audio_sr = example["sample_rate"]
-        tokenized_inputs["input_audio_features"], tokenized_inputs["is_longer"]  = self.prepare_audio(audio_data, audio_sr)
+        tokenized_inputs["input_audio_features"], tokenized_inputs["audio_attention_mask"]  = self.prepare_audio(audio_data, audio_sr)
         return tokenized_inputs
 
     def __len__(self):
@@ -276,6 +275,7 @@ class DataCollatorWithPadding:
                 elif key_data[0].dim() == 2: 
                     padded_batch[key] = pad_2d_tensor(key_data)
                 elif key_data[0].dim() == 3: 
+                    print("USed dim = 3")
                     padded_batch[key] = torch.stack(key_data) 
             elif isinstance(key_data[0], list):
                 data_el = "string"

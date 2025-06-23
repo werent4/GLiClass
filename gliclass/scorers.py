@@ -51,10 +51,9 @@ class AudioTokenScorerDot(nn.Module):
         pass
 
     def forward(self, text_rep, label_rep):
-        scores = torch.einsum('BSD,BCD->BSC', text_rep, label_rep)  # (8, 249, 7)
+        scores = torch.einsum('BSD,BCD->BSC', text_rep, label_rep)
+        scores = torch.max(scores, dim=1).values   # (Batch, Labels)
         
-        scores = torch.mean(scores, dim=1)  # (Batch, Labels)
-                
         return scores
     
 class MLPScorer(nn.Module):
