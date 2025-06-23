@@ -96,7 +96,6 @@ class GLiClassDataset(Dataset):
             sampling_rate=self.sampling_rate,
             return_tensors="pt" 
         )
-
         return audio_inputs["input_features"].squeeze(0), audio_inputs["is_longer"] 
     
     def tokenize(self, texts):

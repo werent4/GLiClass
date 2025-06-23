@@ -15,6 +15,163 @@ from .utils import default_f1_reward
 from .pipeline import ZeroShotClassificationPipeline
 from collections import defaultdict
 
+
+def get_component_name(param_name):
+    if 'audio_encoder' in param_name:
+        return 'audio_encoder'
+    elif 'audio_projector' in param_name:
+        return 'audio_projector'
+    elif 'text_projector' in param_name:
+        return 'text_projector'
+    elif 'encoder_model' in param_name or ('encoder' in param_name and 'audio_encoder' not in param_name):
+        return 'text_encoder'
+    elif 'scorer' in param_name:
+        return 'scorer'
+    else:
+        return 'others'
+
+def check_frozen_layers(model):
+    print("=== FROZEN LAYERS CHECK ===")
+    
+    component_stats = {
+        'audio_encoder': {'total': 0, 'trainable': 0, 'frozen': 0},
+        'text_encoder': {'total': 0, 'trainable': 0, 'frozen': 0},
+        'audio_projector': {'total': 0, 'trainable': 0, 'frozen': 0},
+        'text_projector': {'total': 0, 'trainable': 0, 'frozen': 0},
+        'others': {'total': 0, 'trainable': 0, 'frozen': 0}
+    }
+    
+    for name, param in model.named_parameters():
+        component = get_component_name(name)
+        component_stats[component]['total'] += param.numel()
+        
+        if param.requires_grad:
+            component_stats[component]['trainable'] += param.numel()
+            print(f"GOOD {name}: {param.numel():,} params, requires_grad=True")
+        else:
+            component_stats[component]['frozen'] += param.numel()
+            print(f"BADBADBAD {name}: {param.numel():,} params, requires_grad=FALSE")
+    
+    for comp, stats in component_stats.items():
+        if stats['total'] > 0:
+            pct = stats['trainable'] / stats['total'] * 100
+            print(f"{comp}: {stats['trainable']:,}/{stats['total']:,} ({pct:.1f}%) trainable")
+
+def check_gradient_flow(model):
+    print("=== GRADIENT FLOW CHECK ===")
+
+    no_grad_layers = []
+    small_grad_layers = []
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if param.grad is None:
+                no_grad_layers.append(name)
+                print(f"NO GRADIENT: {name}")
+            elif torch.norm(param.grad) < 1e-8:
+                small_grad_layers.append(name)
+                print(f"TINY GRADIENT: {name}, norm={torch.norm(param.grad):.2e}")
+            else:
+                print(f"OK GRADIENT: {name}, norm={torch.norm(param.grad):.2e}")
+    
+    print(f"\nSummary:")
+    print(f"Layers with NO gradients: {len(no_grad_layers)}")
+    print(f"Layers with TINY gradients: {len(small_grad_layers)}")
+
+def check_detached_branches(model):
+    print("=== DETACHED BRANCHES CHECK ===")
+    
+    def hook_fn(module, input, output):
+        if hasattr(output, 'requires_grad'):
+            print(f"{module.__class__.__name__}: requires_grad={output.requires_grad}")
+        elif isinstance(output, tuple):
+            for i, out in enumerate(output):
+                if hasattr(out, 'requires_grad'):
+                    print(f"{module.__class__.__name__}[{i}]: requires_grad={out.requires_grad}")
+    
+    for name, module in model.named_modules():
+        if any(x in name for x in ['audio_encoder', 'text_encoder', 'projector']):
+            module.register_forward_hook(hook_fn)
+
+def check_suspicious_areas(model):
+    print("=== SUSPICIOUS AREAS CHECK ===")
+    
+    for name, param in model.named_parameters():
+        if 'embedding' in name.lower():
+            print(f"Embedding {name}: requires_grad={param.requires_grad}")
+
+    for name, module in model.named_modules():
+        if any(x in name.lower() for x in ['norm', 'batch', 'layer']):
+            for pname, param in module.named_parameters():
+                print(f"Norm {name}.{pname}: requires_grad={param.requires_grad}")
+    
+    for name, param in model.named_parameters():
+        if any(x in name for x in ['classifier', 'head', 'scorer']):
+            print(f"Head {name}: requires_grad={param.requires_grad}")
+
+def check_feature_normalization(model):
+    print("=== FEATURE NORMALIZATION CHECK ===")
+    
+    def feature_hook(name):
+        def hook(module, input, output):
+            if hasattr(output, 'data'):
+                data = output.data
+                print(f"{name} output:")
+                print(f"    Mean: {data.mean():.4f}, Std: {data.std():.4f}")
+                print(f"    Range: [{data.min():.2f}, {data.max():.2f}]")
+                print(f"    Shape: {data.shape}")
+                
+        return hook
+    
+    key_modules = ['audio_projector', 'text_projector', 'scorer']
+    for name, module in model.named_modules():
+        if any(key in name for key in key_modules):
+            module.register_forward_hook(feature_hook(name))
+
+def check_activation_saturation(model):
+    print("=== ACTIVATION SATURATION CHECK ===")
+    
+    saturation_hooks = []
+    
+    def activation_hook(name, activation_type):
+        def hook(module, input, output):
+            if isinstance(input, tuple):
+                pre_activation = input[0]
+            else:
+                pre_activation = input
+                
+            if hasattr(pre_activation, 'data'):
+                data = pre_activation.data
+                
+                if activation_type == 'sigmoid':
+                    saturated = torch.abs(data) > 5.0
+                    saturated_pct = saturated.float().mean().item() * 100
+                    
+                elif activation_type == 'tanh':  
+                    saturated = torch.abs(data) > 3.0
+                    saturated_pct = saturated.float().mean().item() * 100
+                    
+                elif activation_type == 'relu':
+                    dead = data < 0
+                    saturated_pct = dead.float().mean().item() * 100
+                    
+                print(f"{name} ({activation_type}): {saturated_pct:.1f}% saturated")
+                print(f"    Pre-activation range: [{data.min():.2f}, {data.max():.2f}]")
+                
+        return hook
+    
+    for name, module in model.named_modules():
+        if 'sigmoid' in str(type(module)).lower():
+            hook = module.register_forward_hook(activation_hook(name, 'sigmoid'))
+            saturation_hooks.append(hook)
+        elif 'tanh' in str(type(module)).lower():
+            hook = module.register_forward_hook(activation_hook(name, 'tanh'))
+            saturation_hooks.append(hook)
+        elif isinstance(module, torch.nn.ReLU):
+            hook = module.register_forward_hook(activation_hook(name, 'relu'))
+            saturation_hooks.append(hook)
+
+
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
@@ -45,6 +202,7 @@ class Trainer(transformers.Trainer):
         """
         model.train()
         try:
+            # with torch.autograd.set_detect_anomaly(True):
             if "labels_text" in inputs:
                 labels_text = inputs.pop('labels_text')
             if "input_texts" in inputs:
@@ -537,13 +695,56 @@ class RLTrainer(Trainer):
 class AnalysisTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.gradient_stats = {}
-        self.activation_stats = {}
+
+        # torch.autograd.set_detect_anomaly(True)
+
+        self.current_step_gradients = {}
         self.hooks = []
         self.step_count = 0
+        self.component_param_counts = {}
+        self.analyze_model_parameters()
+
+    def analyze_model_parameters(self):
+        print("Model Parameter Analysis:")
+        print("=" * 60)
+        
+        component_stats = {}
+        total_params = 0
+        total_trainable = 0
+        total_frozen = 0
+        
+        for name, param in self.model.named_parameters():
+            component = self._get_component_name(name)
+            
+            if component not in component_stats:
+                component_stats[component] = {
+                    'total': 0,
+                    'trainable': 0, 
+                    'frozen': 0,
+                    'param_names': []
+                }
+
+            param_count = param.numel()
+            component_stats[component]['total'] += param_count
+            component_stats[component]['param_names'].append(name)
+            
+            if param.requires_grad:
+                component_stats[component]['trainable'] += param_count
+                total_trainable += param_count
+            else:
+                component_stats[component]['frozen'] += param_count
+                total_frozen += param_count
+                
+            total_params += param_count
+        
+        print(f"TOTAL PARAMETERS: {total_params:,}")
+        print(f"Trainable: {total_trainable:,} ({total_trainable/total_params*100:.1f}%)")
+        print(f"Frozen: {total_frozen:,} ({total_frozen/total_params*100:.1f}%)")
+        print()
 
     def setup_hooks(self):
         self._count_component_parameters()
+        
         def param_gradient_hook(component_name):
             def hook(grad):
                 if grad is not None:
@@ -553,16 +754,15 @@ class AnalysisTrainer(Trainer):
                         grad_std = torch.std(grad, unbiased=False).item()
                     else:
                         grad_std = 0.0
-            
-                    
-                    if component_name not in self.gradient_stats:
-                        self.gradient_stats[component_name] = {
+
+                    if component_name not in self.current_step_gradients:
+                        self.current_step_gradients[component_name] = {
                             'norms': [], 'means': [], 'stds': []
                         }
                     
-                    self.gradient_stats[component_name]['norms'].append(grad_norm)
-                    self.gradient_stats[component_name]['means'].append(grad_mean)
-                    self.gradient_stats[component_name]['stds'].append(grad_std)
+                    self.current_step_gradients[component_name]['norms'].append(grad_norm)
+                    self.current_step_gradients[component_name]['means'].append(grad_mean)
+                    self.current_step_gradients[component_name]['stds'].append(grad_std)
                 return grad
             return hook
 
@@ -607,17 +807,21 @@ class AnalysisTrainer(Trainer):
                 print(f"  {component}: {count:,} parameters")
                 self.log({f"params/{component}_count": count})
         
-    def training_step(self, model, inputs, *args, **kwargs):        
+    def training_step(self, model, inputs, *args, **kwargs):
+        self.current_step_gradients.clear()
+        
         loss = super().training_step(model, inputs, *args, **kwargs)
         self.step_count += 1
 
         if self.step_count % 100 == 0:
-            self.log_and_clear_stats()
+            self.log_gradient_stats()
             
         return loss
 
-    def log_and_clear_stats(self):
-        for component, stats in self.gradient_stats.items():
+    def log_gradient_stats(self):
+        print(f"Step {self.step_count}:")
+        
+        for component, stats in self.current_step_gradients.items():
             if stats['norms']:
                 total_norm = sum(stats['norms'])
                 avg_mean = sum(stats['means']) / len(stats['means'])
@@ -626,18 +830,16 @@ class AnalysisTrainer(Trainer):
                 self.log({f"grad/{component}_norm": total_norm})
                 self.log({f"grad/{component}_mean": avg_mean})
                 self.log({f"grad/{component}_std": avg_std})
-
+                
                 param_count = self.component_param_counts.get(component, 1)
                 if param_count > 0:
                     normalized_norm = total_norm / param_count
                     self.log({f"grad/{component}_norm_per_param": normalized_norm})
-                    
-                    # sqrt_normalized_norm = total_norm / (param_count ** 0.5)
-                    # self.log({f"grad/{component}_norm_per_sqrt_param": sqrt_normalized_norm})
-
-        self.gradient_stats.clear()
 
     def cleanup_hooks(self):
         for hook in self.hooks:
             hook.remove()
         self.hooks.clear()
+
+    def __del__(self):
+        self.cleanup_hooks()

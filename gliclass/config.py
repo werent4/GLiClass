@@ -27,7 +27,7 @@ class GLiClassModelConfig(PretrainedConfig):
         audio_token_index=-1,
         ignore_index=-100,
         hidden_size=None,
-        projector_hidden_act="relu",
+        projector_hidden_act="gelu",
         projection_dim = 512,
         vocab_size=None,
         problem_type='single_label_classification',
@@ -46,7 +46,7 @@ class GLiClassModelConfig(PretrainedConfig):
         prompt_first = False,
         squeeze_layers = False,
         embed_class_token = True, 
-        init_from_larger_clap = True,
+        init_from_larger_clap = False,
         **kwargs,
     ):
         if isinstance(encoder_config, dict):
