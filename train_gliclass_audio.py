@@ -55,7 +55,6 @@ def main(args):
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.encoder_model_name)
-        print(args.encoder_model_name)
         encoder_config = AutoConfig.from_pretrained(args.encoder_model_name)
         audiocfg = AutoConfig.from_pretrained(args.audio_model_name)
         audio_feature_extractor = AutoFeatureExtractor.from_pretrained(args.audio_model_name)
@@ -82,7 +81,7 @@ def main(args):
             shuffle_labels=args.shuffle_labels
         )
 
-        model = GLiClassModel(glicalss_config, from_pretrained=True)
+        model = GLiClassModel(glicalss_config, from_pretrained=True, tokenizer= tokenizer)
 
         if args.architecture_type in  {'uni-encoder', 'bi-encoder-fused', 'encoder-decoder', 'audio-encoder', 'audio-bi-encoder'}:
             new_words = ["<<LABEL>>", "<<SEP>>", "<<AUDIO>>"]
@@ -156,6 +155,17 @@ def main(args):
         report_to="none",
         fp16=args.fp16,
         )
+    
+    args_to_save = {
+        "args": vars(args),
+    }
+    
+    metrics_output_path = os.path.join(args.save_path, "args.json")
+    os.makedirs(os.path.dirname(metrics_output_path), exist_ok=True)
+    
+    with open(metrics_output_path, "w") as f:
+        json.dump(args_to_save, f, indent=4)
+    
 
     trainer = AnalysisTrainer(
         model=model,
@@ -188,8 +198,8 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default= None)
     parser.add_argument('--encoder_model_name', type=str, default = "microsoft/deberta-v3-base")
     parser.add_argument('--audio_model_name', type=str, default = "facebook/hubert-large-ls960-ft") # 
-    parser.add_argument('--save_path', type=str, default = "models/gliclas-hu-audio")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
-    parser.add_argument('--data_path', type=str, default =  "datasets/processed_dataset.json")
+    parser.add_argument('--save_path', type=str, default = "/mnt/storage-werent4-2tb/models/1M-gliclas-hu-audio-base")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
+    parser.add_argument('--data_path', type=str, default =  "/mnt/storage-werent4-2tb/generic-dataset/gliclass-audio-datset-merged.json")
     parser.add_argument('--problem_type', type=str, default='multi_label_classification')
     parser.add_argument('--pooler_type', type=str, default='first')
     parser.add_argument('--scorer_type', type=str, default='audio-token-dot')
@@ -200,25 +210,25 @@ if __name__ == '__main__':
     parser.add_argument('--use_lstm', type=bool, default=False)
     parser.add_argument('--squeeze_layers', type=bool, default=False)
     parser.add_argument('--shuffle_labels', type=bool, default=True)
-    parser.add_argument('--num_epochs', type=int, default=2) #££££££££££££££
-    parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
+    parser.add_argument('--num_epochs', type=int, default=1) #££££££££££££££
+    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=8)
     parser.add_argument('--encoder_lr', type=float, default=1e-5)
     parser.add_argument('--audio_lr', type=float, default=1e-5)
     parser.add_argument('--others_lr', type=float, default=1e-5)
     parser.add_argument('--encoder_weight_decay', type=float, default=0.015)
     parser.add_argument('--audio_weight_decay', type=float, default=0.015)
     parser.add_argument('--others_weight_decay', type=float, default=0.015)
-    parser.add_argument('--warmup_ratio', type=float, default=0.05)
+    parser.add_argument('--warmup_ratio', type=float, default=0.008) # approx 10k steps if data size ~1M
     parser.add_argument('--lr_scheduler_type', type=str, default='cosine')
-    parser.add_argument('--focal_loss_alpha', type=float, default=-1)#0.9)
-    parser.add_argument('--focal_loss_gamma', type=float, default=-1)#2.5)
+    parser.add_argument('--focal_loss_alpha', type=float, default=0.6)
+    parser.add_argument('--focal_loss_gamma', type=float, default=2)
     parser.add_argument('--contrastive_loss_coef', type=float, default=0.)
-    parser.add_argument('--max_length', type=int, default=1024)
+    parser.add_argument('--max_length', type=int, default=2048)
     parser.add_argument('--sampling_rate', type= int, default= 16000)
     parser.add_argument('--max_duration_s', type= int, default= 15, help="Max allowed duration of audio segment in seconds")
-    parser.add_argument('--save_steps', type=int, default=200)
-    parser.add_argument('--save_total_limit', type=int, default=3)
+    parser.add_argument('--save_steps', type=int, default=5000)
+    parser.add_argument('--save_total_limit', type=int, default=15)
     parser.add_argument('--num_workers', type=int, default=6)
     parser.add_argument('--fp16', type=bool, default=False)
     args = parser.parse_args()

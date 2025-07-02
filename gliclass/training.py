@@ -695,9 +695,7 @@ class RLTrainer(Trainer):
 class AnalysisTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
         # torch.autograd.set_detect_anomaly(True)
-
         self.current_step_gradients = {}
         self.hooks = []
         self.step_count = 0
@@ -813,9 +811,9 @@ class AnalysisTrainer(Trainer):
         loss = super().training_step(model, inputs, *args, **kwargs)
         self.step_count += 1
 
-        if self.step_count % 100 == 0:
+        if (self.step_count % self.args.gradient_accumulation_steps == 0 and 
+            (self.step_count // self.args.gradient_accumulation_steps) % self.args.logging_steps == 0):
             self.log_gradient_stats()
-            
         return loss
 
     def log_gradient_stats(self):
