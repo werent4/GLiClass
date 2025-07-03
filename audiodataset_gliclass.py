@@ -101,7 +101,8 @@ def main(args):
         "processing_date": str(np.datetime64('now')),
         "num_samples": len(dataset),
         "label_mapping": id2label,
-        "audio_dir": audio_dir
+        "audio_dir": audio_dir,
+        "dataset_file_name": os.path.basename(args.save_path).split('/')[-1],
     }
     
     metadata_path = os.path.join(os.path.dirname(args.save_path), "metadata.json")

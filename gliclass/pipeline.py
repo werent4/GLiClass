@@ -261,12 +261,12 @@ class BiEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline
         return tokenized_inputs
 
 class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipeline):
-    def __init__(self, model, tokenizer, audio_tokenizer, max_classes=25, max_length=1024, max_length_audio_s=5, 
+    def __init__(self, model, tokenizer, audio_features_extractor, max_classes=25, max_length=1024, max_length_audio_s=5, 
                  classification_type='multi-label', device='cuda:0', progress_bar=True, sample_rate=16000):
         super().__init__(model, tokenizer, max_classes, max_length, classification_type, device, progress_bar)
         self.sample_rate = sample_rate
-        self.audio_tokenizer = audio_tokenizer
-        self.max_length_audio = max_length_audio_s * 16000
+        self.audio_features_extractor = audio_features_extractor 
+        self.max_length_audio = max_length_audio_s * self.sample_rate
 
     def prepare_input(self, labels):
         input_text = []
@@ -279,25 +279,6 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
         else:
             input_text = '<<AUDIO>>'+''.join(input_text)
         return input_text
-    
-    def process_audio_file(self, audio_path):
-        audio_raw, sample_rate = torchaudio.load(audio_path)
-        if audio_raw.shape[0] > 1:
-            raise ValueError(f"Audio file {audio_path} has more than one channel.")
-
-        if sample_rate != self.sample_rate:
-            print(f"Resampling {audio_path} from {sample_rate} to {self.sample_rate}")
-            audio_raw = torchaudio.transforms.Resample(
-                orig_freq=sample_rate, new_freq=self.sample_rate
-            )(audio_raw)
-
-        if audio_raw.shape[1] > self.max_length_audio:
-            audio_raw = audio_raw[:, :self.max_length_audio]
-        elif audio_raw.shape[1] < self.max_length_audio:
-            audio_raw = torch.nn.functional.pad(audio_raw, (0, self.max_length_audio - audio_raw.shape[1]), mode='constant', value=0)
-
-        features = self.audio_tokenizer(audio_raw, sampling_rate=self.sample_rate, return_tensors="pt")['input_values'].squeeze(0)
-        return features
 
     def prepare_inputs(self, audio_paths, labels, same_labels=False):
         text_inputs = []
@@ -308,21 +289,42 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
             for i in range(len(audio_paths)):
                 text_inputs.append(self.prepare_input(labels[i]))
 
-
-        audio_features = []
+        audio_raw_list = []
         for path in audio_paths:
-            audio_features.append(self.process_audio_file(path))
+            audio_raw, sample_rate = torchaudio.load(path)
+            if audio_raw.shape[0] > 1:
+                raise ValueError(f"Audio file {path} has more than one channel.")
 
-        inpts = self.tokenizer(text_inputs, truncation=True, 
+            if sample_rate != self.sample_rate:
+                print(f"Resampling {path} from {sample_rate} to {self.sample_rate}")
+                audio_raw = torchaudio.transforms.Resample(
+                    orig_freq=sample_rate, new_freq=self.sample_rate
+                )(audio_raw)
+            
+            if len(audio_raw.shape) == 2:
+                audio_raw = audio_raw.squeeze(0)
+
+            audio_raw_list.append(audio_raw.numpy())
+
+        tokenized_inputs = self.tokenizer(text_inputs, truncation=True, 
                                     max_length=self.max_length, 
                                     padding="longest", return_tensors="pt").to(self.device)
-        batch_inputs = {
-            'input_ids': inpts['input_ids'],
-            'attention_mask': inpts['attention_mask'],
-            'audio_input': torch.cat(audio_features, dim=0).to(self.device)
-        }
         
-        return batch_inputs
+        audio_inputs = self.audio_features_extractor(
+            audio_raw_list, 
+            sampling_rate=self.sample_rate,
+            return_tensors="pt",
+            padding="longest",
+            truncation=True, 
+            max_length=self.max_length_audio  
+        )
+        
+        labels_mask = [[1 for i in range(len(labels))] for j in range(len(text_inputs))]
+        tokenized_inputs["labels_mask"] = torch.tensor(labels_mask).to(self.device)
+        tokenized_inputs["input_audio_features"] = audio_inputs["input_values"].to(self.device)
+        tokenized_inputs["audio_attention_mask"] = audio_inputs["attention_mask"].to(self.device)
+        
+        return tokenized_inputs
 
     @torch.no_grad()
     def __call__(self, audio_paths, labels, threshold=0.5, batch_size=8, rac_examples=None):
@@ -375,7 +377,7 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
 
 class ZeroShotClassificationPipeline:
     def __init__(self, model, tokenizer, max_classes=25, max_length=1024, 
-                                classification_type='multi-label', device='cuda:0', progress_bar=True, audio_tokenizer=None, max_length_audio_s=5, sample_rate=16000):
+                                classification_type='multi-label', device='cuda:0', progress_bar=True, audio_features_extractor=None, max_length_audio_s=5, sample_rate=16000):
         if isinstance(model, str):
             model = GLiClassBiEncoder.from_pretrained(model)
         if model.config.architecture_type == 'uni-encoder':
@@ -388,7 +390,7 @@ class ZeroShotClassificationPipeline:
             self.pipe = BiEncoderZeroShotClassificationPipeline(model, tokenizer, max_classes, 
                                                                     max_length, classification_type, device, progress_bar)
         elif model.config.architecture_type in {'audio-encoder'}:
-            self.pipe = AudioEncoderZeroShotClassificationPipeline(model, tokenizer, audio_tokenizer, max_classes,
+            self.pipe = AudioEncoderZeroShotClassificationPipeline(model, tokenizer, audio_features_extractor, max_classes,
                                                                    max_length=max_length, max_length_audio_s=max_length_audio_s,
                                                                    classification_type=classification_type, device=device, progress_bar=progress_bar, sample_rate=sample_rate)
         else:
