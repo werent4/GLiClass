@@ -59,7 +59,7 @@ class Evaluaor:
             if 'all_labels' in row:
                 all_labels.update(row['all_labels'])
             else:
-                warnings.warn(f"missing collumn `all_labels` for {id} row", UserWarning)
+                warnings.warn(f"missing collumn all_labels for {row['id']} row", UserWarning)
         print("Tottal unique labels: ", len(all_labels))
         return list(all_labels)
 
@@ -84,31 +84,31 @@ class Evaluaor:
 
         return evaluation_objects
 
-    def prepare_input(self, labels, model):
+    def prepare_input(self, labels, prompt_first):
         input_text = []
         for label in labels:
             label_tag = f"<<LABEL>>{label.lower()}"
             input_text.append(label_tag)
         input_text.append("<<SEP>>")
-        if model.config.prompt_first:
+        if prompt_first:
             input_text = "".join(input_text) + "<<AUDIO>>"
         else:
             input_text = "<<AUDIO>>" + "".join(input_text)
         return input_text
 
-    def calculate_results(self, logits, true_labels, threshold: float = -1):
+    def calculate_results(self, logits, true_labels, all_labels_batch, threshold: float = -1):
         probabilities = torch.nn.functional.sigmoid(logits)
-        if threshold > 0:
-            predictions = (probabilities > threshold).cpu().numpy()
-            predicted_classes = []
-            for pred in predictions:
-                classes = [self.all_labels[i] for i in range(len(pred)) if pred[i]]
-                predicted_classes.append(classes)
-        else:
-            predictions = np.argmax(probabilities.cpu().detach().numpy(), axis=1)
-            predicted_classes = []
-            for pred_idx in predictions:
-                predicted_classes.append([self.all_labels[pred_idx]])
+
+        predicted_classes = []
+        for i, (sample_probs, sample_labels) in enumerate(zip(probabilities, all_labels_batch)):
+            if threshold > 0:
+                predictions = (sample_probs > threshold).cpu().numpy()
+                classes = [sample_labels[j] for j, pred in enumerate(predictions) if pred]
+            else:
+                best_idx = torch.argmax(sample_probs).item()
+                classes = [sample_labels[best_idx]]
+            
+            predicted_classes.append(classes)
 
         tp = {label: 0 for label in self.all_labels}
         fp = {label: 0 for label in self.all_labels}
@@ -189,6 +189,7 @@ class Evaluaor:
             model = object_.get_model()
             tokenizer = object_.get_tokenizer()
             audio_feature_extractor = object_.get_features_extractor()
+            prompt_first = model.config.prompt_first
 
             print("Evaluating model: ", name)
             model.eval()
@@ -204,8 +205,12 @@ class Evaluaor:
 
                 audio_raw_list = []
                 prompts = []
+                all_labels_batch = [] 
+                true_labels_batch = []
                 for row in batch_rows:
-                    prompts.append(self.prepare_input(row["all_labels"], model))
+                    prompts.append(self.prepare_input(row["all_labels"], prompt_first))
+                    all_labels_batch.append(row["all_labels"]) 
+                    true_labels_batch.append(row["true_labels"]) 
 
                     audio_raw = torch.load(row['audio_path']).float()
                     sample_rate = row["sample_rate"]
@@ -225,7 +230,6 @@ class Evaluaor:
                     truncation=True,
                     max_length=16000 * 15
                 )
-                true_labels = [row['true_labels'] for row in batch_rows]
 
                 tokenized_inputs = tokenizer(
                     prompts, 
@@ -235,14 +239,14 @@ class Evaluaor:
                     return_tensors="pt"
                 ).to(self.device)
 
-                labels_mask = torch.ones(len(batch_rows), len(self.all_labels)).to(self.device)
+                labels_mask = torch.ones(len(batch_rows), len(all_labels_batch)).to(self.device)
                 tokenized_inputs["labels_mask"] = labels_mask
                 tokenized_inputs["input_audio_features"] = audio_inputs["input_values"].to(self.device)
                 tokenized_inputs["audio_attention_mask"] = audio_inputs["attention_mask"].to(self.device)
 
                 with torch.no_grad():
                     logits = model(**tokenized_inputs).logits
-                batch_tp, batch_fp, batch_tn, batch_fn = self.calculate_results(logits, true_labels)
+                batch_tp, batch_fp, batch_tn, batch_fn = self.calculate_results(logits, true_labels_batch, all_labels_batch)
                 for label in self.all_labels:
                     models_results[name]["tp"][label] += batch_tp[label]
                     models_results[name]["fp"][label] += batch_fp[label]
@@ -279,20 +283,62 @@ def load_synthetic_vocal_bursts_splittrain(dataset_name="synthetic_vocal_bursts_
     random.shuffle(dataset)
     return dataset
 
+def load_LAION_Audio_300M_splittrain(dataset_name="LAION-Audio-300M_splittrain", data_path: str = "./datasets/LAION-Audio-300M_splittrain/laion-LAION-Audio-300M_splittrain.json"):
+    print("Loading dataset: ", dataset_name)
+    with open(data_path, "r", encoding='utf-8') as f:
+        dataset = json.load(f)
+    random.shuffle(dataset)
+    return dataset
 
+######### RUNNERS FUNC ################
 
-def main():
+def eval_emotions():
+    evaluator = Evaluaor(
+        dataset_name= "Hemg/Emotion-audio-Dataset",
+        loader_fn = load_emotions_dataset,
+        models_names= [
+            "werent4/1M-gliclas-hu-audio-base-chp45k",
+            "werent4/1M-gliclas-hu-audio-base-chp60k"
+        ],
+        eval_subset_size= 1000,
+        max_length= 512
+    )
+    results = evaluator.evaluate(batch_size= 4)
+    pprint(results)
+
+def eval_synthetic_vocal_bursts_splittrain():
     evaluator = Evaluaor(
         dataset_name= "synthetic_vocal_bursts_splittrain",
         loader_fn = load_synthetic_vocal_bursts_splittrain,
         models_names= [
-            "werent4/1M-gliclas-hu-audio-base-chp45k"
+            "werent4/1M-gliclas-hu-audio-base-chp45k",
+            "werent4/1M-gliclas-hu-audio-base-chp60k"
         ],
-        eval_subset_size= 100,
-        max_length= 2048
+        eval_subset_size= 1000,
+        max_length= 1900
     )
-    results = evaluator.evaluate(batch_size= 2)
+    results = evaluator.evaluate(batch_size= 1)
     pprint(results)
+
+def eval_LAION_Audio_300M_splittrain():
+    evaluator = Evaluaor(
+        dataset_name= "LAION-Audio-300M_splittrain",
+        loader_fn = load_LAION_Audio_300M_splittrain,
+        models_names= [
+            "werent4/1M-gliclas-hu-audio-base-chp45k",
+            "werent4/1M-gliclas-hu-audio-base-chp60k"
+        ],
+        eval_subset_size= 1000,
+        max_length= 1280
+    )
+    results = evaluator.evaluate(batch_size= 1)
+    pprint(results)
+
+def main():
+    # eval_emotions()
+    # eval_synthetic_vocal_bursts_splittrain()
+    eval_LAION_Audio_300M_splittrain()
+
 
 if __name__ == "__main__":
     main()
