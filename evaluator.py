@@ -260,6 +260,8 @@ class Evaluaor:
                 models_results[name]["fn"]
             )
             models_results[name].update(metrics)
+            if return_clean:
+                pprint(self.get_clean_results(models_results))
 
             if return_clean:
                 models_results = self.get_clean_results(models_results)
@@ -292,52 +294,75 @@ def load_LAION_Audio_300M_splittrain(dataset_name="LAION-Audio-300M_splittrain",
 
 ######### RUNNERS FUNC ################
 
-def eval_emotions():
+def eval_emotions(eval_size):
+    DATASET_NAME = "Hemg/Emotion-audio-Dataset"
     evaluator = Evaluaor(
-        dataset_name= "Hemg/Emotion-audio-Dataset",
+        dataset_name= DATASET_NAME,
         loader_fn = load_emotions_dataset,
         models_names= [
-            "werent4/1M-gliclas-hu-audio-base-chp45k",
-            "werent4/1M-gliclas-hu-audio-base-chp60k"
+            # "werent4/1M-gliclas-hu-audio-base-chp45k",
+            # "werent4/1M-gliclas-hu-audio-base-chp60k",
+            # "werent4/1M-gliclas-hu-audio-base-chp85k",
+            "werent4/1M-gliclas-hu-audio-base-chp100k",
+            "werent4/1M-gliclas-hu-audio-base-chp115k",
+            # FEW SHOT MODELS
+            # "models/gliclas-hu-audio-base-emo-2/checkpoint-16",
+            # "werent4/gliclas-hu-audio-base-emo-4", #"models/gliclas-hu-audio-base-emo-4/checkpoint-24",
+            # "models/gliclas-hu-audio-base-emo-6-ep-8-wr-03/checkpoint-40",
+            # "models/gliclas-hu-audio-base-emo-8-wr-03/checkpoint-28",
+            # "models/gliclas-hu-audio-base-emo-16-ep-4-wr-03/checkpoint-56",
+            # "models/gliclas-hu-audio-base-emo-16-wr-03/checkpoint-28"
         ],
-        eval_subset_size= 1000,
-        max_length= 512
+        eval_subset_size= eval_size,
+        max_length= 1024
     )
     results = evaluator.evaluate(batch_size= 4)
+    print("Results for: ", DATASET_NAME)
     pprint(results)
 
-def eval_synthetic_vocal_bursts_splittrain():
+def eval_synthetic_vocal_bursts_splittrain(eval_size):
+    DATASET_NAME = "synthetic_vocal_bursts_splittrain"
     evaluator = Evaluaor(
-        dataset_name= "synthetic_vocal_bursts_splittrain",
+        dataset_name= DATASET_NAME,
         loader_fn = load_synthetic_vocal_bursts_splittrain,
         models_names= [
             "werent4/1M-gliclas-hu-audio-base-chp45k",
-            "werent4/1M-gliclas-hu-audio-base-chp60k"
+            "werent4/1M-gliclas-hu-audio-base-chp60k",
+            "werent4/1M-gliclas-hu-audio-base-chp85k",
+            "werent4/1M-gliclas-hu-audio-base-chp100k",
+            "werent4/1M-gliclas-hu-audio-base-chp115k",
         ],
-        eval_subset_size= 1000,
+        eval_subset_size= eval_size,
         max_length= 1900
     )
     results = evaluator.evaluate(batch_size= 1)
+    print("Results for: ", DATASET_NAME)
     pprint(results)
 
-def eval_LAION_Audio_300M_splittrain():
+def eval_LAION_Audio_300M_splittrain(eval_size):
+    DATASET_NAME = "LAION-Audio-300M_splittrain"
     evaluator = Evaluaor(
-        dataset_name= "LAION-Audio-300M_splittrain",
+        dataset_name= DATASET_NAME,
         loader_fn = load_LAION_Audio_300M_splittrain,
         models_names= [
-            "werent4/1M-gliclas-hu-audio-base-chp45k",
-            "werent4/1M-gliclas-hu-audio-base-chp60k"
+            # "werent4/1M-gliclas-hu-audio-base-chp45k",
+            # "werent4/1M-gliclas-hu-audio-base-chp60k",
+            # "werent4/1M-gliclas-hu-audio-base-chp85k",
+            "werent4/1M-gliclas-hu-audio-base-chp100k",
+            "werent4/1M-gliclas-hu-audio-base-chp115k",
         ],
-        eval_subset_size= 1000,
+        eval_subset_size= eval_size,
         max_length= 1280
     )
     results = evaluator.evaluate(batch_size= 1)
+    print("Results for: ", DATASET_NAME)
     pprint(results)
 
 def main():
-    # eval_emotions()
-    # eval_synthetic_vocal_bursts_splittrain()
-    eval_LAION_Audio_300M_splittrain()
+    EVAL_SIZE = 5000
+    # eval_synthetic_vocal_bursts_splittrain(EVAL_SIZE)
+    eval_emotions(EVAL_SIZE)    
+    # eval_LAION_Audio_300M_splittrain(EVAL_SIZE)
 
 
 if __name__ == "__main__":
