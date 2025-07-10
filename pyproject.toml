@@ -12,6 +12,8 @@ torchaudio = "^2.0.0"
 transformers = ">=4.37.2,<=4.48.2"
 scikit-learn = "^1.0.0" 
 numpy = "^1.26.4"
+python-dotenv = "^1.1.1"
+boto3 = "^1.39.3"
 
 
 [build-system]
