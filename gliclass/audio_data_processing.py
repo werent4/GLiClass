@@ -173,7 +173,7 @@ class GLiClassAudioDataset(IterableDataset):
 
         tokenized_inputs = self.tokenize(input_text)
         tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
-        tokenized_inputs['labels_text'] =  example['all_labels']
+        # tokenized_inputs['labels_text'] =  example['all_labels']
 
         audio_data = torch.load(example['audio_path'], weights_only=False)
         audio_sr = example["sample_rate"]
@@ -225,7 +225,6 @@ class GLiClassAudioDataset(IterableDataset):
             with self.download_lock:
                 self.download_futures.pop(local_path, None)
             if is_last:
-                print("Last file in batch completed, setting `loading_in_process = False`")
                 self.loading_in_process = False
     
     def load_next(self, data_to_iterate, current_counter):
@@ -340,8 +339,6 @@ class GLiClassAudioDataset(IterableDataset):
         preloaded_data_start = ((counter + 1) // self.preload_size - 1) * self.preload_size
         preloaded_data_end = preloaded_data_start + self.preload_size
         
-        print(f"Scheduling async cleanup for range [{preloaded_data_start}:{preloaded_data_end-1}]")
-
         # we call additional thread here, this thread will make cleanup for us, to not stop main loop execution
         cleanup_thread = threading.Thread(
             target=self._cleanup_batch,
@@ -386,7 +383,6 @@ class GLiClassAudioDataset(IterableDataset):
             if self.need_preload and not self.loading_in_process:
                 self.load_next(data_to_iterate, last_preloaded_index)
                 new_last_preloaded = min(last_preloaded_index + self.preload_size, len(data_to_iterate) - 1)
-                print(f"Starting data preload from {last_preloaded_index + 1} to {new_last_preloaded}")
                 last_preloaded_index = new_last_preloaded
                 self.need_preload = False
             

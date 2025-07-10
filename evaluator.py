@@ -268,12 +268,13 @@ class Evaluaor:
         return models_results
 
 def load_emotions_dataset(dataset_name="Hemg/Emotion-audio-Dataset", metadata_path: str = "./datasets/metadata.json"):
-    print("Loading dataset: ", dataset_name)
-    with open(metadata_path, "r", encoding='utf-8') as f:
-        metadata = json.load(f)
-    dataset_path = os.path.join(os.path.dirname(metadata_path), metadata["dataset_file_name"])
-
-    with open(dataset_path, "r", encoding='utf-8') as f:
+    # print("Loading dataset: ", dataset_name)
+    # with open(metadata_path, "r", encoding='utf-8') as f:
+        # metadata = json.load(f)
+    # dataset_path = os.path.join(os.path.dirname(metadata_path), metadata["dataset_file_name"])
+    file_path = "./datasets/eval_emotions.json"
+    print ("LOADING FILE: ", file_path)
+    with open(file_path, "r", encoding='utf-8') as f:
         dataset = json.load(f)
     random.shuffle(dataset)
     return dataset
@@ -303,8 +304,12 @@ def eval_emotions(eval_size):
             # "werent4/1M-gliclas-hu-audio-base-chp45k",
             # "werent4/1M-gliclas-hu-audio-base-chp60k",
             # "werent4/1M-gliclas-hu-audio-base-chp85k",
-            "werent4/1M-gliclas-hu-audio-base-chp100k",
-            "werent4/1M-gliclas-hu-audio-base-chp115k",
+            # "werent4/1M-gliclas-hu-audio-base-chp100k",
+            # "werent4/1M-gliclas-hu-audio-base-chp115k",
+            # "werent4/1M-gliclas-hu-audio-base-v1 "
+            # "models/scratch-gliclas-hu-audio-emo/checkpoint-7200",
+            # "models/1M-gliclas-hu-audio-base-v1-emo/checkpoint-1440"
+            "models/1M-gliclas-hu-audio-base-v1-emo-ep-5/checkpoint-7200"
             # FEW SHOT MODELS
             # "models/gliclas-hu-audio-base-emo-2/checkpoint-16",
             # "werent4/gliclas-hu-audio-base-emo-4", #"models/gliclas-hu-audio-base-emo-4/checkpoint-24",
@@ -312,11 +317,19 @@ def eval_emotions(eval_size):
             # "models/gliclas-hu-audio-base-emo-8-wr-03/checkpoint-28",
             # "models/gliclas-hu-audio-base-emo-16-ep-4-wr-03/checkpoint-56",
             # "models/gliclas-hu-audio-base-emo-16-wr-03/checkpoint-28"
+            # "models/gliclas-hu-audio-base-v1-emo-2/checkpoint-32",
+            # "models/gliclas-hu-audio-base-v1-emo-4/checkpoint-48",
+            # "models/gliclas-hu-audio-base-v1-emo-6/checkpoint-48",
+            # "models/gliclas-hu-audio-base-v1-emo-8/checkpoint-28",
+            # "models/gliclas-hu-audio-base-v1-emo-8-ep-8/checkpoint-56",
+            # "models/gliclas-hu-audio-base-v1-emo-16/checkpoint-28",
+            # "models/gliclas-hu-audio-base-v1-emo-16-ep-4/checkpoint-56",
+            # "models/gliclas-hu-audio-base-v1-emo-16-ep-8/checkpoint-112",
         ],
         eval_subset_size= eval_size,
         max_length= 1024
     )
-    results = evaluator.evaluate(batch_size= 4)
+    results = evaluator.evaluate(batch_size= 12)
     print("Results for: ", DATASET_NAME)
     pprint(results)
 
@@ -326,11 +339,12 @@ def eval_synthetic_vocal_bursts_splittrain(eval_size):
         dataset_name= DATASET_NAME,
         loader_fn = load_synthetic_vocal_bursts_splittrain,
         models_names= [
-            "werent4/1M-gliclas-hu-audio-base-chp45k",
-            "werent4/1M-gliclas-hu-audio-base-chp60k",
-            "werent4/1M-gliclas-hu-audio-base-chp85k",
-            "werent4/1M-gliclas-hu-audio-base-chp100k",
-            "werent4/1M-gliclas-hu-audio-base-chp115k",
+            # "werent4/1M-gliclas-hu-audio-base-chp45k",
+            # "werent4/1M-gliclas-hu-audio-base-chp60k",
+            # "werent4/1M-gliclas-hu-audio-base-chp85k",
+            # "werent4/1M-gliclas-hu-audio-base-chp100k",
+            # "werent4/1M-gliclas-hu-audio-base-chp115k",
+            "/mnt/storage-werent4-2tb/models/1M-gliclas-hu-audio-base/checkpoint-135480"
         ],
         eval_subset_size= eval_size,
         max_length= 1900
@@ -348,8 +362,9 @@ def eval_LAION_Audio_300M_splittrain(eval_size):
             # "werent4/1M-gliclas-hu-audio-base-chp45k",
             # "werent4/1M-gliclas-hu-audio-base-chp60k",
             # "werent4/1M-gliclas-hu-audio-base-chp85k",
-            "werent4/1M-gliclas-hu-audio-base-chp100k",
-            "werent4/1M-gliclas-hu-audio-base-chp115k",
+            # "werent4/1M-gliclas-hu-audio-base-chp100k",
+            # "werent4/1M-gliclas-hu-audio-base-chp115k",
+            "/mnt/storage-werent4-2tb/models/1M-gliclas-hu-audio-base/checkpoint-135480"
         ],
         eval_subset_size= eval_size,
         max_length= 1280
@@ -360,9 +375,9 @@ def eval_LAION_Audio_300M_splittrain(eval_size):
 
 def main():
     EVAL_SIZE = 5000
+    # eval_LAION_Audio_300M_splittrain(EVAL_SIZE)
     # eval_synthetic_vocal_bursts_splittrain(EVAL_SIZE)
     eval_emotions(EVAL_SIZE)    
-    # eval_LAION_Audio_300M_splittrain(EVAL_SIZE)
 
 
 if __name__ == "__main__":

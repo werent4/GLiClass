@@ -88,7 +88,7 @@ def main(args):
             shuffle_labels=args.shuffle_labels
         )
 
-        model = GLiClassModel(glicalss_config, from_pretrained=True, tokenizer= tokenizer)
+        model = GLiClassModel(glicalss_config, from_pretrained=True)
 
         if args.architecture_type in  {'uni-encoder', 'bi-encoder-fused', 'encoder-decoder', 'audio-encoder', 'audio-bi-encoder'}:
             new_words = ["<<LABEL>>", "<<SEP>>", "<<AUDIO>>"]
@@ -108,6 +108,8 @@ def main(args):
     print('Dataset is shuffled...')
 
     train_data = data[:int(len(data)*0.9)]
+    train_data = train_data[:25000]
+    print("len(train_data): ", len(train_data))
     test_data = data[int(len(data)*0.9):]
 
     print('Dataset is splitted...')
@@ -130,7 +132,8 @@ def main(args):
         audio_features_extractor= audio_feature_extractor,
         sampling_rate= args.sampling_rate,
         max_duration_s=args.max_duration_s,
-        local_cache_dir= "../datasets/cache"
+        local_cache_dir= "./datasets/cache",
+        preload_size= 100
     )
 
     data_collator = DataCollatorWithPadding(device=device)
@@ -174,7 +177,7 @@ def main(args):
         json.dump(args_to_save, f, indent=4)
     
 
-    trainer = AnalysisTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -182,7 +185,6 @@ def main(args):
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
-    trainer.setup_hooks()
     trainer.train()
 
     
@@ -202,8 +204,8 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default= None)
     parser.add_argument('--encoder_model_name', type=str, default = "microsoft/deberta-v3-base")
     parser.add_argument('--audio_model_name', type=str, default = "facebook/hubert-large-ls960-ft") # 
-    parser.add_argument('--save_path', type=str, default = "/mnt/storage-werent4-2tb/models/1M-gliclas-hu-audio-base")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
-    parser.add_argument('--data_path', type=str, default =  "/mnt/storage-werent4-2tb/generic-dataset/gliclass-audio-datset-merged.json")
+    parser.add_argument('--save_path', type=str, default = "./models/test_aws_dataset")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
+    parser.add_argument('--data_path', type=str, default =  "./datasets/annotations-short-merged.json")
     parser.add_argument('--problem_type', type=str, default='multi_label_classification')
     parser.add_argument('--pooler_type', type=str, default='first')
     parser.add_argument('--scorer_type', type=str, default='audio-token-dot')

@@ -53,6 +53,7 @@ def main(args):
         model = GLiClassModel.from_pretrained(args.model_name, focal_loss_alpha=args.focal_loss_alpha,
                                                                 focal_loss_gamma=args.focal_loss_gamma)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+        audio_feature_extractor = AutoFeatureExtractor.from_pretrained(args.model_name)
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.encoder_model_name)
         encoder_config = AutoConfig.from_pretrained(args.encoder_model_name)
@@ -81,7 +82,7 @@ def main(args):
             shuffle_labels=args.shuffle_labels
         )
 
-        model = GLiClassModel(glicalss_config, from_pretrained=True, tokenizer= tokenizer)
+        model = GLiClassModel(glicalss_config, from_pretrained=True)
 
         if args.architecture_type in  {'uni-encoder', 'bi-encoder-fused', 'encoder-decoder', 'audio-encoder', 'audio-bi-encoder'}:
             new_words = ["<<LABEL>>", "<<SEP>>", "<<AUDIO>>"]
@@ -101,6 +102,9 @@ def main(args):
     print('Dataset is shuffled...')
 
     train_data = data[:int(len(data)*0.9)]
+    train_data = train_data[:25000]
+    print("len(train_data): ", len(train_data))
+
     test_data = data[int(len(data)*0.9):]
 
     print('Dataset is splitted...')
@@ -117,18 +121,18 @@ def main(args):
         sampling_rate= args.sampling_rate,
         max_duration_s=args.max_duration_s
     )
-    test_dataset = GLiClassDataset(
-        test_data,
-        tokenizer,
-        args.max_length,
-        args.problem_type, 
-        args.architecture_type,
-        args.prompt_first,
-        labels_tokenizer=tokenizer,
-        audio_features_extractor= audio_feature_extractor,
-        sampling_rate= args.sampling_rate,
-        max_duration_s=args.max_duration_s
-    )
+    # test_dataset = GLiClassDataset(
+    #     test_data,
+    #     tokenizer,
+    #     args.max_length,
+    #     args.problem_type, 
+    #     args.architecture_type,
+    #     args.prompt_first,
+    #     labels_tokenizer=tokenizer,
+    #     audio_features_extractor= audio_feature_extractor,
+    #     sampling_rate= args.sampling_rate,
+    #     max_duration_s=args.max_duration_s
+    # )
 
     data_collator = DataCollatorWithPadding(device=device)
 
@@ -144,9 +148,9 @@ def main(args):
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
+        # per_device_eval_batch_size=args.batch_size,
         num_train_epochs=args.num_epochs,
-        evaluation_strategy="epoch",
+        # evaluation_strategy="epoch",
         save_steps = args.save_steps,
         save_total_limit=args.save_total_limit,
         dataloader_num_workers = args.num_workers,
@@ -167,39 +171,39 @@ def main(args):
         json.dump(args_to_save, f, indent=4)
     
 
-    trainer = AnalysisTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=test_dataset,
+        # eval_dataset=test_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
-    trainer.setup_hooks()
+    # trainer.setup_hooks()
     trainer.train()
 
-    eval_results = trainer.evaluate()
+    # eval_results = trainer.evaluate()
     
-    results_to_save = {
-        "args": vars(args),
-        "eval_metrics": eval_results
-    }
+    # results_to_save = {
+    #     "args": vars(args),
+    #     "eval_metrics": eval_results
+    # }
     
-    metrics_output_path = os.path.join(args.save_path, "training_results.json")
-    os.makedirs(os.path.dirname(metrics_output_path), exist_ok=True)
+    # metrics_output_path = os.path.join(args.save_path, "training_results.json")
+    # os.makedirs(os.path.dirname(metrics_output_path), exist_ok=True)
     
-    with open(metrics_output_path, "w") as f:
-        json.dump(results_to_save, f, indent=4)
+    # with open(metrics_output_path, "w") as f:
+    #     json.dump(results_to_save, f, indent=4)
     
-    print(f"Training metrics and arguments saved to {metrics_output_path}")
+    # print(f"Training metrics and arguments saved to {metrics_output_path}")
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default= None)
+    parser.add_argument('--model_name', type=str, default= None)#"werent4/1M-gliclas-hu-audio-base-v1")
     parser.add_argument('--encoder_model_name', type=str, default = "microsoft/deberta-v3-base")
     parser.add_argument('--audio_model_name', type=str, default = "facebook/hubert-large-ls960-ft") # 
-    parser.add_argument('--save_path', type=str, default = "/mnt/storage-werent4-2tb/models/1M-gliclas-hu-audio-base")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
-    parser.add_argument('--data_path', type=str, default =  "/mnt/storage-werent4-2tb/generic-dataset/gliclass-audio-datset-merged.json")
+    parser.add_argument('--save_path', type=str, default = "models/usual_dataset") #"./models/scratch-gliclas-hu-audio-emo")
+    parser.add_argument('--data_path', type=str, default =  "/mnt/storage-werent4-2tb/generic-dataset/annotations-short-merged.json")
     parser.add_argument('--problem_type', type=str, default='multi_label_classification')
     parser.add_argument('--pooler_type', type=str, default='first')
     parser.add_argument('--scorer_type', type=str, default='audio-token-dot')
@@ -227,7 +231,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_length', type=int, default=2048)
     parser.add_argument('--sampling_rate', type= int, default= 16000)
     parser.add_argument('--max_duration_s', type= int, default= 15, help="Max allowed duration of audio segment in seconds")
-    parser.add_argument('--save_steps', type=int, default=5000)
+    parser.add_argument('--save_steps', type=int, default=10000)
     parser.add_argument('--save_total_limit', type=int, default=15)
     parser.add_argument('--num_workers', type=int, default=6)
     parser.add_argument('--fp16', type=bool, default=False)
