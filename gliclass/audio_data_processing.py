@@ -14,6 +14,8 @@ import time
 import warnings
 from enum import Enum
 
+# TODO: Dataset class; S3Manager class; 
+
 class DownloadStatus(Enum):
     NOT_STARTED = "not_started"
     DOWNLOADING = "downloading"
@@ -58,7 +60,8 @@ class GLiClassAudioDataset(IterableDataset):
             shuffle_labels = True,
             local_cache_dir='../datasets/cache',
             max_load_workers=4,
-            preload_size = 20
+            preload_size = 20,
+            remaining_preloaded_threshold = 5
         ):
         if architecture_type != 'audio-encoder':
             raise ValueError("This class was specifecly created for 'audio-encoder' arch")
@@ -91,6 +94,7 @@ class GLiClassAudioDataset(IterableDataset):
             
         self.need_preload = True
         self.preload_size = preload_size
+        self.remaining_preloaded_threshold = remaining_preloaded_threshold
         self.local_cache_dir = local_cache_dir
         self.max_load_workers = max_load_workers
 
@@ -349,7 +353,6 @@ class GLiClassAudioDataset(IterableDataset):
 
 
     def __iter__(self):
-        remaining_preloaded_threshold = 5
         worker_info = torch.utils.data.get_worker_info()
         
         if worker_info is None:
@@ -376,8 +379,8 @@ class GLiClassAudioDataset(IterableDataset):
             example['audio_path'] = local_path
 
             remaining_preloaded = last_preloaded_index - counter
-            if remaining_preloaded <= remaining_preloaded_threshold and not self.loading_in_process:
-                print(f"Triggering preload: {remaining_preloaded} files remaining (counter: {counter}, last_preloaded: {last_preloaded_index})")
+            if remaining_preloaded <= self.remaining_preloaded_threshold and not self.loading_in_process:
+                # print(f"Triggering preload: {remaining_preloaded} files remaining (counter: {counter}, last_preloaded: {last_preloaded_index})")
                 self.need_preload = True
 
             if self.need_preload and not self.loading_in_process:

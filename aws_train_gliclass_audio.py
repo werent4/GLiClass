@@ -133,7 +133,8 @@ def main(args):
         sampling_rate= args.sampling_rate,
         max_duration_s=args.max_duration_s,
         local_cache_dir= "./datasets/cache",
-        preload_size= 100
+        preload_size= 1000,
+        remaining_preloaded_threshold= 20
     )
 
     data_collator = DataCollatorWithPadding(device=device)
