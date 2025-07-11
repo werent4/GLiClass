@@ -1,3 +1,4 @@
+import json
 import random
 import torch
 import threading
@@ -41,7 +42,108 @@ def get_local_path(s3_path, local_cache_dir):
     local_path = os.path.join(local_cache_dir, subset_dir, filename)
     return local_path
 
-# TODO: Dataset class; S3Manager class; cacheManager class
+class JSONLManager:
+    def __init__(
+        self,
+        jsonl_path: str,
+        validate_json_file: bool = True,
+        buffer_size: int = 8192
+    ):
+        self.jsonl_path = jsonl_path
+        self.validate_json_file = validate_json_file
+        self.buffer_size = buffer_size
+        self.invalid_indexes = []
+
+    def get_data_path(self):
+        return self.jsonl_path
+
+    def count_examples(self) -> int:
+        count = 0
+        invalid_indexes = []
+        
+        with open(self.jsonl_path, 'r', encoding='utf-8') as f:
+            remainder = ""
+            while True:
+                buffer = f.read(self.buffer_size)
+                if not buffer:
+                    # process the last line if it exists
+                    if remainder.strip():
+                        if self.validate_json_file:
+                            try:
+                                json.loads(remainder.strip())
+                            except json.JSONDecodeError:
+                                invalid_indexes.append(count) 
+                        count += 1
+                    break
+                
+                # Merge the remainder into the new buffer
+                data = remainder + buffer
+                lines = data.split('\n')
+                # last line may be incomplete
+                remainder = lines[-1]
+                
+                # process all full lines
+                for line in lines[:-1]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    if self.validate_json_file:
+                        try:
+                            json.loads(line)
+                        except json.JSONDecodeError:
+                            invalid_indexes.append(count) 
+                    count += 1
+        
+        if self.validate_json_file and len(invalid_indexes) > 0:
+            self.invalid_indexes = invalid_indexes
+            print(f"{len(invalid_indexes)}/{count} are invalid JSON lines in file: {self.jsonl_path}")
+            print(f"Invalid line indexes: {invalid_indexes}")
+        else:
+            print("All examples are valid!")
+
+        return count
+    
+    def get_data_slice_generator(self, start=0, end=None):
+        line_count = 0
+        buffer = ""
+        
+        with open(self.jsonl_path, 'r', encoding='utf-8', buffering=self.buffer_size) as f:
+            while True:
+                chunk = f.read(self.buffer_size)
+                if not chunk:
+                    break
+                    
+                buffer += chunk
+                lines = buffer.split('\n')
+                buffer = lines[-1]
+                
+                for line in lines[:-1]:
+                    if line_count < start:
+                        line_count += 1
+                        continue
+
+                    if end is not None and line_count >= end:
+                        return
+                        
+                    if line_count in self.invalid_indexes:
+                        warnings.warn(f"Skiping line {line_count}; Its invalid json line", UserWarning)
+                        line_count += 1
+                        continue
+
+                    try:
+                        data = json.loads(line.strip())
+                        yield data
+                    except json.JSONDecodeError:
+                        pass
+                    line_count += 1
+            
+            if buffer and line_count >= start and (end is None or line_count < end):
+                try:
+                    data = json.loads(buffer.strip())
+                    yield data
+                except json.JSONDecodeError:
+                    pass
 
 class CacheManager:
     def __init__(self):
@@ -110,7 +212,6 @@ class CacheManager:
             daemon=True
         )
         cleanup_thread.start()
-
 
 class S3Manager:
     def __init__(
@@ -302,7 +403,7 @@ class S3Manager:
 class GLiClassAudioDataset(IterableDataset):
     def __init__(
             self,
-            examples,
+            dataset_path,
             s3manager,
             tokenizer,
             max_length=512, 
@@ -312,6 +413,7 @@ class GLiClassAudioDataset(IterableDataset):
             sampling_rate = 16000,
             max_duration_s = 15, # seconds
             shuffle_labels = True,
+            **json_manger_kwargs 
         ):
         if architecture_type != 'audio-encoder':
             raise ValueError("This class was specifecly created for 'audio-encoder' arch")
@@ -334,12 +436,15 @@ class GLiClassAudioDataset(IterableDataset):
         self.tokenizer = tokenizer
         self.audio_features_extractor = audio_features_extractor
         self.max_length = max_length
-        self._data = examples
+        self.dataset_path = dataset_path
         self.problem_type = problem_type
-        self.dataset_labels = self.collect_dataset_labels()
         self.shuffle_labels = shuffle_labels
-        print('Total labels: ', len(self.dataset_labels))
 
+        self.jsonl_manager = JSONLManager(
+            jsonl_path= dataset_path,
+            **json_manger_kwargs 
+        )
+        self.num_examples = 1000#self.jsonl_manager.count_examples()
 
         self.sampling_rate = sampling_rate
         self.max_duration_s = max_duration_s
@@ -347,13 +452,10 @@ class GLiClassAudioDataset(IterableDataset):
         print(f"Audio parameters: sampling_rate={self.sampling_rate}, "
                 f"max_duration={self.max_duration_s}s, "
                 f"max_samples={self.max_duration_samples}")
+        
+    def get_num_examples(self):
+        return self.num_examples
 
-    def collect_dataset_labels(self):
-        dataset_labels = set()
-        for example in self._data:
-            dataset_labels.update(set(example['all_labels']))
-        return dataset_labels
-    
     def prepare_labels(self, example, label2idx, problem_type):
         if problem_type == 'single_label_classification':
             labels = label2idx[example['true_labels'][0]]
@@ -425,14 +527,14 @@ class GLiClassAudioDataset(IterableDataset):
         
         if worker_info is None:
             worker_id = "main"
-            data_to_iterate = self._data
+            data_to_iterate = list(self.jsonl_manager.get_data_slice_generator(0))
         else:
-            per_worker = int(np.ceil(len(self._data) / float(worker_info.num_workers)))
+            per_worker = int(np.ceil(self.num_examples / float(worker_info.num_workers)))
             worker_id = worker_info.id
             iter_start = worker_id * per_worker
-            iter_end = min(iter_start + per_worker, len(self._data))
+            iter_end = min(iter_start + per_worker, self.num_examples)
             print(f"worker_id: {worker_id}, [{iter_start}: {iter_end}]")
-            data_to_iterate = self._data[iter_start:iter_end]
+            data_to_iterate = list(self.jsonl_manager.get_data_slice_generator(iter_start, iter_end))
 
         self.s3manager.load_next(data_to_iterate, -1)
         last_preloaded_index = min(self.preload_size - 1, len(data_to_iterate) - 1)
