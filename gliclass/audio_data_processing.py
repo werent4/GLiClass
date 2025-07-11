@@ -11,10 +11,9 @@ import os
 from urllib.parse import urlparse
 from pathlib import Path
 import time
+import boto3
 import warnings
 from enum import Enum
-
-# TODO: Dataset class; S3Manager class; 
 
 class DownloadStatus(Enum):
     NOT_STARTED = "not_started"
@@ -42,56 +41,88 @@ def get_local_path(s3_path, local_cache_dir):
     local_path = os.path.join(local_cache_dir, subset_dir, filename)
     return local_path
 
-class GLiClassAudioDataset(IterableDataset):
+# TODO: Dataset class; S3Manager class; cacheManager class
+
+class CacheManager:
+    def __init__(self):
+        self.local_cache_dir = None
+        self.preload_size = None
+        self.processed_files = set()
+        self.download_lock = None
+        
+        self.s3_manager = None
+        self._initialized = False
+
+    def set_s3_manager(self, s3_manager):
+        self.s3_manager = s3_manager
+    
+    def init_from_s3manager(self):
+        if self.s3_manager is None:
+            raise ValueError("S3Manager must be set before initialization")
+        
+        self.local_cache_dir = self.s3_manager.get_cache_dir()
+        self.preload_size = self.s3_manager.get_preload_size()
+        self.download_lock = self.s3_manager.get_download_lock()
+        self._initialized = True
+
+    def check_initialized(self):
+        if not self._initialized:
+            raise RuntimeError("CacheManager not initialized. Call init_from_s3manager() first")
+
+    def mark_file_as_processed(self, local_path):
+        with self.download_lock:
+            self.processed_files.add(local_path)
+
+    def _cleanup_batch(self, preloaded_data_start, preloaded_data_end, data_to_iterate):
+        files_to_remove = []
+        for i in range(preloaded_data_start, min(preloaded_data_end, len(data_to_iterate))):
+            s3_path = data_to_iterate[i]['audio_path']
+            local_path = get_local_path(s3_path, self.local_cache_dir)
+            with self.download_lock:
+                if (local_path in self.processed_files and
+                    self.s3_manager and 
+                    local_path not in self.s3_manager.download_futures):
+                    files_to_remove.append(local_path)
+
+        removed_count = 0
+        for local_path in files_to_remove:
+            try:
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+                    removed_count += 1
+            except Exception as e:
+                print(f"Cleanup error: {e}")
+            
+            with self.download_lock:
+                if self.s3_manager:
+                    self.s3_manager.file_status.pop(local_path, None)
+                self.processed_files.discard(local_path)
+        print(f"Cleanup: removed {removed_count}/{len(files_to_remove)} files")
+
+    def cleanup_processed_files(self, counter, data_to_iterate):
+        preloaded_data_start = ((counter + 1) // self.preload_size - 1) * self.preload_size
+        preloaded_data_end = preloaded_data_start + self.preload_size
+        
+        # we call additional thread here, this thread will make cleanup for us, to not stop main loop execution
+        cleanup_thread = threading.Thread(
+            target=self._cleanup_batch,
+            args=(preloaded_data_start, preloaded_data_end, data_to_iterate),
+            daemon=True
+        )
+        cleanup_thread.start()
+
+
+class S3Manager:
     def __init__(
             self,
-            examples,
-            s3_client,
-            tokenizer,
-            max_length=512, 
-            problem_type='multi_label_classification', 
-            architecture_type = 'audio-encoder',
-            prompt_first=False,
-            get_negatives = False,
-            max_labels = 150,
-            audio_features_extractor=None,
-            sampling_rate = 16000,
-            max_duration_s = 15, # seconds
-            shuffle_labels = True,
-            local_cache_dir='../datasets/cache',
-            max_load_workers=4,
-            preload_size = 20,
-            remaining_preloaded_threshold = 5
+            s3_client: boto3.Session.client ,
+            local_cache_dir: str|Path ='../datasets/cache',
+            max_load_workers: int =4,
+            preload_size:int = 20,
+            remaining_preloaded_threshold:int = 5,
         ):
-        if architecture_type != 'audio-encoder':
-            raise ValueError("This class was specifecly created for 'audio-encoder' arch")
-        
         self.s3_client = s3_client
-        self.tokenizer = tokenizer
-        self.audio_features_extractor = audio_features_extractor
-        self.max_length = max_length
-        self._data = examples
-        self.problem_type = problem_type
-        self.prompt_first = prompt_first
-        self.dataset_labels = self.collect_dataset_labels()
-        self.get_negatives = get_negatives
-        self.max_labels = max_labels
-        self.shuffle_labels = shuffle_labels
-        print('Total labels: ', len(self.dataset_labels))
 
-        if self.audio_features_extractor is not None:
-            if sampling_rate is None or max_duration_s is None:
-                raise ValueError(
-                    "When using audio_features_extractor you must specify "
-                    "sampling_rate и max_duration_s"
-                )
-            self.sampling_rate = sampling_rate
-            self.max_duration_s = max_duration_s
-            self.max_duration_samples = self.sampling_rate * self.max_duration_s
-            print(f"Audio parameters: sampling_rate={self.sampling_rate}, "
-                  f"max_duration={self.max_duration_s}s, "
-                  f"max_samples={self.max_duration_samples}")
-            
         self.need_preload = True
         self.preload_size = preload_size
         self.remaining_preloaded_threshold = remaining_preloaded_threshold
@@ -105,12 +136,217 @@ class GLiClassAudioDataset(IterableDataset):
         self.download_lock = threading.Lock()
         self.processed_files = set() # stores files which were already processed in main loop; needs Lock
 
-        self.download_stats = { # needs Lock
+        self.download_stats = {
             'total_requested': 0,
             'completed': 0,
             'failed': 0,
             'cached': 0
         }
+
+        self._init_cache_manager()
+
+    def _init_cache_manager(self):
+        self.cache_manager = CacheManager()
+        self.cache_manager.set_s3_manager(self)
+        self.cache_manager.init_from_s3manager()
+        self.cache_manager.check_initialized()
+
+    def get_cache_manager(self):
+        return self.cache_manager
+
+    def get_cache_dir(self) -> str|Path:
+        return self.local_cache_dir
+
+    def get_remaining_preloaded_threshold(self):
+        return self.remaining_preloaded_threshold
+
+    def get_preload_size(self):
+        return self.preload_size
+
+    def get_load_status(self):
+        with self.download_lock:
+            return self.loading_in_process
+    
+    def set_load_status(self, load_status: bool):
+        with self.download_lock:
+            self.loading_in_process = load_status
+
+    def get_download_lock(self):
+        return self.download_lock 
+
+    def get_file_status(self, local_path):
+        with self.download_lock:
+            return self.file_status.get(local_path, DownloadStatus.NOT_STARTED)
+
+    def set_file_status(self, local_path, status):
+        with self.download_lock:
+            self.file_status[local_path] = status    
+
+    def download_file(self, s3_path, local_path, is_last= False):
+        bucket, key = parse_s3_path(s3_path)
+        if bucket is None:
+            return False
+        try:
+            self.set_file_status(local_path, DownloadStatus.DOWNLOADING)
+
+            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+            self.s3_client.download_file(
+                Bucket=bucket,
+                Key=key,
+                Filename=local_path
+            )
+
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                self.set_file_status(local_path, DownloadStatus.COMPLETED)
+                with self.download_lock:
+                    self.download_stats['completed'] += 1
+                return True
+            else:
+                raise Exception("File not created or empty")
+            
+        except Exception as e:
+            print(f"Failed to load {s3_path}: {e}")
+            self.set_file_status(local_path, DownloadStatus.FAILED)
+            with self.download_lock:
+                self.download_stats['failed'] += 1
+            return False
+        
+        finally:
+            with self.download_lock:
+                self.download_futures.pop(local_path, None)
+            if is_last:
+                self.set_load_status(False)
+                # self.loading_in_process = False
+    
+    def load_next(self, data_to_iterate, current_counter):
+        start_idx = current_counter + 1
+        end_idx = min(start_idx + self.preload_size, len(data_to_iterate))
+
+        if start_idx >= len(data_to_iterate):
+            return
+
+        submitted_count = 0
+        for i in range(start_idx, end_idx):
+            s3_path = data_to_iterate[i]['audio_path']
+            local_path = get_local_path(s3_path, self.local_cache_dir)
+
+            if os.path.exists(local_path):
+                self.set_file_status(local_path, DownloadStatus.COMPLETED)
+                with self.download_lock:
+                    self.download_stats['cached'] += 1
+                continue
+            
+            status = self.get_file_status(local_path)
+            if status in [DownloadStatus.DOWNLOADING, DownloadStatus.COMPLETED]:
+                continue
+            
+            is_last_in_batch = (i == end_idx - 1)
+            with self.download_lock:
+                self.download_stats['total_requested'] += 1
+                future = self.download_executor.submit(self.download_file, s3_path, local_path, is_last_in_batch)
+                self.download_futures[local_path] = future
+                submitted_count += 1
+
+        if submitted_count > 0:
+            self.set_load_status(True)
+            # self.loading_in_process = True
+            print(f"Started {submitted_count} new loads")
+
+    def ensure_loaded(self, s3_path, timeout = 10) -> bool|str:
+        local_path = get_local_path(s3_path, self.local_cache_dir)
+        status = self.get_file_status(local_path)
+
+        # skip iteration if failed
+        if status == DownloadStatus.FAILED:
+            return False
+        
+        # start loading if NOT starteed
+        if status == DownloadStatus.NOT_STARTED:
+            print(f"Emergency download: {s3_path}")
+            with self.download_lock:
+                self.download_stats['total_requested'] += 1
+                future = self.download_executor.submit(self.download_file, s3_path, local_path)
+                self.download_futures[local_path] = future
+            status = DownloadStatus.DOWNLOADING
+        
+        # wait for `timeout` seconds for download
+        if status == DownloadStatus.DOWNLOADING:
+            print(f"Waiting for download: {s3_path}")
+
+            start_time = time.time()
+            last_log_time = start_time
+
+            while time.time() - start_time < timeout:
+                current_status = self.get_file_status(local_path)
+
+                if current_status == DownloadStatus.COMPLETED and os.path.exists(local_path):
+                    return local_path
+                elif current_status == DownloadStatus.FAILED:
+                    return False
+                
+                if time.time() - last_log_time >= 5:
+                    elapsed = time.time() - start_time
+                    print(f"Still waiting for file: {s3_path}; {elapsed:.0f}/{timeout}s: {local_path}")
+                    last_log_time = time.time()
+                time.sleep(0.5)
+
+            print(f"Download timeout: {s3_path}")
+            return False
+        
+        # if exists just return local path
+        if os.path.exists(local_path) and status == DownloadStatus.COMPLETED:
+            return local_path
+        
+        return False
+
+class GLiClassAudioDataset(IterableDataset):
+    def __init__(
+            self,
+            examples,
+            s3manager,
+            tokenizer,
+            max_length=512, 
+            problem_type='multi_label_classification', 
+            architecture_type = 'audio-encoder',
+            audio_features_extractor=None,
+            sampling_rate = 16000,
+            max_duration_s = 15, # seconds
+            shuffle_labels = True,
+        ):
+        if architecture_type != 'audio-encoder':
+            raise ValueError("This class was specifecly created for 'audio-encoder' arch")
+        if audio_features_extractor is None:
+            raise ValueError("audio_features_extractor was not provided")
+        if sampling_rate is None or max_duration_s is None:
+            raise ValueError(
+                "When using audio_features_extractor you must specify "
+                "sampling_rate и max_duration_s"
+            )
+        
+        self.s3manager = s3manager
+        self.preload_size = self.s3manager.get_preload_size()
+        self.remaining_preloaded_threshold = self.s3manager.get_remaining_preloaded_threshold()
+        self.local_cache_dir = self.s3manager.get_cache_dir()
+        self.need_preload = False
+
+        self.cache_manager = s3manager.get_cache_manager()
+
+        self.tokenizer = tokenizer
+        self.audio_features_extractor = audio_features_extractor
+        self.max_length = max_length
+        self._data = examples
+        self.problem_type = problem_type
+        self.dataset_labels = self.collect_dataset_labels()
+        self.shuffle_labels = shuffle_labels
+        print('Total labels: ', len(self.dataset_labels))
+
+
+        self.sampling_rate = sampling_rate
+        self.max_duration_s = max_duration_s
+        self.max_duration_samples = self.sampling_rate * self.max_duration_s
+        print(f"Audio parameters: sampling_rate={self.sampling_rate}, "
+                f"max_duration={self.max_duration_s}s, "
+                f"max_samples={self.max_duration_samples}")
 
     def collect_dataset_labels(self):
         dataset_labels = set()
@@ -184,174 +420,6 @@ class GLiClassAudioDataset(IterableDataset):
         tokenized_inputs["input_audio_features"], tokenized_inputs["audio_attention_mask"]  = self.prepare_audio(audio_data, audio_sr)
         return tokenized_inputs
 
-    def get_file_status(self, local_path):
-        with self.download_lock:
-            return self.file_status.get(local_path, DownloadStatus.NOT_STARTED)
-
-    def set_file_status(self, local_path, status):
-        with self.download_lock:
-            self.file_status[local_path] = status    
-
-    def mark_file_as_processed(self, local_path):
-        with self.download_lock:
-            self.processed_files.add(local_path)
-
-    def download_file(self, s3_path, local_path, is_last= False):
-        bucket, key = parse_s3_path(s3_path)
-        if bucket is None:
-            return False
-        try:
-            self.set_file_status(local_path, DownloadStatus.DOWNLOADING)
-
-            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-            self.s3_client.download_file(
-                Bucket=bucket,
-                Key=key,
-                Filename=local_path
-            )
-
-            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                self.set_file_status(local_path, DownloadStatus.COMPLETED)
-                with self.download_lock:
-                    self.download_stats['completed'] += 1
-                return True
-            else:
-                raise Exception("File not created or empty")
-            
-        except Exception as e:
-            print(f"Failed to load {s3_path}: {e}")
-            self.set_file_status(local_path, DownloadStatus.FAILED)
-            with self.download_lock:
-                self.download_stats['failed'] += 1
-            return False
-        
-        finally:
-            with self.download_lock:
-                self.download_futures.pop(local_path, None)
-            if is_last:
-                self.loading_in_process = False
-    
-    def load_next(self, data_to_iterate, current_counter):
-        if not self.need_preload:
-            return    
-        
-        start_idx = current_counter + 1
-        end_idx = min(start_idx + self.preload_size, len(data_to_iterate))
-
-        if start_idx >= len(data_to_iterate):
-            return
-        
-        submitted_count = 0
-        for i in range(start_idx, end_idx):
-            s3_path = data_to_iterate[i]['audio_path']
-            local_path = get_local_path(s3_path, self.local_cache_dir)
-
-            if os.path.exists(local_path):
-                self.set_file_status(local_path, DownloadStatus.COMPLETED)
-                with self.download_lock:
-                    self.download_stats['cached'] += 1
-                continue
-            
-            status = self.get_file_status(local_path)
-            if status in [DownloadStatus.DOWNLOADING, DownloadStatus.COMPLETED]:
-                continue
-            
-            is_last_in_batch = (i == end_idx - 1)
-            with self.download_lock:
-                self.download_stats['total_requested'] += 1
-                future = self.download_executor.submit(self.download_file, s3_path, local_path, is_last_in_batch)
-                self.download_futures[local_path] = future
-                submitted_count += 1
-
-        if submitted_count > 0:
-            self.loading_in_process = True
-            print(f"Started {submitted_count} new loads")
-
-    def ensure_loaded(self, s3_path, timeout = 10) -> bool|str:
-        local_path = get_local_path(s3_path, self.local_cache_dir)
-        status = self.get_file_status(local_path)
-
-        # skip iteration if failed
-        if status == DownloadStatus.FAILED:
-            return False
-        
-        # start loading if NOT starteed
-        if status == DownloadStatus.NOT_STARTED:
-            print(f"Emergency download: {s3_path}")
-            with self.download_lock:
-                self.download_stats['total_requested'] += 1
-                future = self.download_executor.submit(self.download_file, s3_path, local_path)
-                self.download_futures[local_path] = future
-            status = DownloadStatus.DOWNLOADING
-        
-        # wait for `timeout` seconds for download
-        if status == DownloadStatus.DOWNLOADING:
-            print(f"Waiting for download: {s3_path}")
-
-            start_time = time.time()
-            last_log_time = start_time
-
-            while time.time() - start_time < timeout:
-                current_status = self.get_file_status(local_path)
-
-                if current_status == DownloadStatus.COMPLETED and os.path.exists(local_path):
-                    return local_path
-                elif current_status == DownloadStatus.FAILED:
-                    return False
-                
-                if time.time() - last_log_time >= 5:
-                    elapsed = time.time() - start_time
-                    print(f"Still waiting for file: {s3_path}; {elapsed:.0f}/{timeout}s: {local_path}")
-                    last_log_time = time.time()
-                time.sleep(0.5)
-
-            print(f"Download timeout: {s3_path}")
-            return False
-        
-        # if exists just return local path
-        if os.path.exists(local_path) and status == DownloadStatus.COMPLETED:
-            return local_path
-        
-        return False
-
-    def _cleanup_batch(self, preloaded_data_start, preloaded_data_end, data_to_iterate):
-        files_to_remove = []
-        for i in range(preloaded_data_start, min(preloaded_data_end, len(data_to_iterate))):
-            s3_path = data_to_iterate[i]['audio_path']
-            local_path = get_local_path(s3_path, self.local_cache_dir)
-            with self.download_lock:
-                if (local_path in self.processed_files and 
-                    local_path not in self.download_futures):
-                    files_to_remove.append(local_path)
-
-        removed_count = 0
-        for local_path in files_to_remove:
-            try:
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-                    removed_count += 1
-            except Exception as e:
-                print(f"Cleanup error: {e}")
-            
-            with self.download_lock:
-                self.file_status.pop(local_path, None)
-                self.processed_files.discard(local_path)
-        print(f"Cleanup: removed {removed_count}/{len(files_to_remove)} files")
-
-
-    def cleanup_processed_files(self, counter, data_to_iterate):
-        preloaded_data_start = ((counter + 1) // self.preload_size - 1) * self.preload_size
-        preloaded_data_end = preloaded_data_start + self.preload_size
-        
-        # we call additional thread here, this thread will make cleanup for us, to not stop main loop execution
-        cleanup_thread = threading.Thread(
-            target=self._cleanup_batch,
-            args=(preloaded_data_start, preloaded_data_end, data_to_iterate),
-            daemon=True
-        )
-        cleanup_thread.start()
-
-
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         
@@ -366,35 +434,34 @@ class GLiClassAudioDataset(IterableDataset):
             print(f"worker_id: {worker_id}, [{iter_start}: {iter_end}]")
             data_to_iterate = self._data[iter_start:iter_end]
 
-        self.load_next(data_to_iterate, -1)
+        self.s3manager.load_next(data_to_iterate, -1)
         last_preloaded_index = min(self.preload_size - 1, len(data_to_iterate) - 1)
         print(f"Initial preload up to index: {last_preloaded_index}")
 
         for counter, example in enumerate(data_to_iterate):
             s3_path = example['audio_path']
-            if not self.ensure_loaded(s3_path):
+            if not self.s3manager.ensure_loaded(s3_path):
                 warnings.warn(f"Skipping example {counter} as failed to load its audio file", UserWarning)
                 continue
             local_path = get_local_path(s3_path, self.local_cache_dir)
             example['audio_path'] = local_path
 
             remaining_preloaded = last_preloaded_index - counter
-            if remaining_preloaded <= self.remaining_preloaded_threshold and not self.loading_in_process:
-                # print(f"Triggering preload: {remaining_preloaded} files remaining (counter: {counter}, last_preloaded: {last_preloaded_index})")
+            if remaining_preloaded <= self.remaining_preloaded_threshold and not self.s3manager.get_load_status():
                 self.need_preload = True
 
-            if self.need_preload and not self.loading_in_process:
-                self.load_next(data_to_iterate, last_preloaded_index)
+            if self.need_preload and not self.s3manager.get_load_status():
+                self.s3manager.load_next(data_to_iterate, last_preloaded_index)
                 new_last_preloaded = min(last_preloaded_index + self.preload_size, len(data_to_iterate) - 1)
                 last_preloaded_index = new_last_preloaded
                 self.need_preload = False
             
             result = self.tokenize_and_prepare_labels_for_audioencoder(example)
 
-            self.mark_file_as_processed(local_path)
+            self.cache_manager.mark_file_as_processed(local_path)
             if counter >= self.preload_size - 1 and (counter + 1) % self.preload_size == 0:
                 print(f"Worker: {worker_id} Called cleanup at idx:{counter}\n")
-                self.cleanup_processed_files(counter, data_to_iterate)
+                self.cache_manager.cleanup_processed_files(counter, data_to_iterate)
             
             yield result
             
