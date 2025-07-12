@@ -1,5 +1,6 @@
 import json
 import random
+import queue
 import torch
 import threading
 from torchaudio.transforms import Resample
@@ -15,6 +16,8 @@ import time
 import boto3
 import warnings
 from enum import Enum
+from typing import Optional, Union, List, Dict, Tuple, Generator, Any, Set
+from transformers import PreTrainedTokenizer, FeatureExtractionMixin
 
 class DownloadStatus(Enum):
     NOT_STARTED = "not_started"
@@ -22,7 +25,7 @@ class DownloadStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
 
-def parse_s3_path(s3_path):
+def parse_s3_path(s3_path: str) -> Tuple[Optional[str], Optional[str]]:
     if not s3_path.startswith('s3://'):
         return None, None
     
@@ -31,7 +34,7 @@ def parse_s3_path(s3_path):
     key = parsed.path.lstrip('/')
     return bucket, key
 
-def get_local_path(s3_path, local_cache_dir):
+def get_local_path(s3_path: str, local_cache_dir: Union[str, Path]) -> str:
     bucket, key = parse_s3_path(s3_path)
     if bucket is None:
         return s3_path
@@ -48,13 +51,13 @@ class JSONLManager:
         jsonl_path: str,
         validate_json_file: bool = True,
         buffer_size: int = 8192
-    ):
+    ) -> None:
         self.jsonl_path = jsonl_path
         self.validate_json_file = validate_json_file
         self.buffer_size = buffer_size
         self.invalid_indexes = []
 
-    def get_data_path(self):
+    def get_data_path(self) -> str:
         return self.jsonl_path
 
     def count_examples(self) -> int:
@@ -104,7 +107,7 @@ class JSONLManager:
 
         return count
     
-    def get_data_slice_generator(self, start=0, end=None):
+    def get_data_slice_generator(self,start: int = 0,end: Optional[int] = None) -> Generator[Dict[str, Any], None, None]:
         line_count = 0
         buffer = ""
         
@@ -146,19 +149,23 @@ class JSONLManager:
                     pass
 
 class CacheManager:
+    GB_KOEF = 1<<30
     def __init__(self):
-        self.local_cache_dir = None
-        self.preload_size = None
-        self.processed_files = set()
-        self.download_lock = None
+        self.local_cache_dir: Optional[Union[str, Path]] = None
+        self.preload_size: Optional[int] = None
+        self.processed_files: Set[str] = set()
+        self.download_lock: Optional[threading.Lock] = None
         
-        self.s3_manager = None
-        self._initialized = False
+        self.s3_manager: Optional['S3Manager'] = None
+        self._initialized: bool = False
 
-    def set_s3_manager(self, s3_manager):
+        self.cleanup_queue = queue.Queue()
+        self.cleanup_running = False
+
+    def set_s3_manager(self, s3_manager: 'S3Manager') -> None:
         self.s3_manager = s3_manager
     
-    def init_from_s3manager(self):
+    def init_from_s3manager(self) -> None:
         if self.s3_manager is None:
             raise ValueError("S3Manager must be set before initialization")
         
@@ -167,15 +174,15 @@ class CacheManager:
         self.download_lock = self.s3_manager.get_download_lock()
         self._initialized = True
 
-    def check_initialized(self):
+    def check_initialized(self) -> None:
         if not self._initialized:
             raise RuntimeError("CacheManager not initialized. Call init_from_s3manager() first")
 
-    def mark_file_as_processed(self, local_path):
+    def mark_file_as_processed(self, local_path: str|Path) -> None:
         with self.download_lock:
             self.processed_files.add(local_path)
 
-    def _cleanup_batch(self, preloaded_data_start, preloaded_data_end, data_to_iterate):
+    def _cleanup_batch(self, preloaded_data_start: int, preloaded_data_end: int, data_to_iterate: List[Dict[str, Any]]) -> None:
         files_to_remove = []
         for i in range(preloaded_data_start, min(preloaded_data_end, len(data_to_iterate))):
             s3_path = data_to_iterate[i]['audio_path']
@@ -201,27 +208,55 @@ class CacheManager:
                 self.processed_files.discard(local_path)
         print(f"Cleanup: removed {removed_count}/{len(files_to_remove)} files")
 
-    def cleanup_processed_files(self, counter, data_to_iterate):
+    def _cleanup_worker(self, ):
+        while True:
+            task = self.cleanup_queue.get()
+            if task is None:
+                break
+            
+            start, end, data = task
+            self._cleanup_batch(start, end, data)
+
+    def cleanup_processed_files(self, counter: int, data_to_iterate: List[Dict[str, Any]]) -> None:
+        if not self.cleanup_running:
+            self.cleanup_running = True
+            thread = threading.Thread(target=self._cleanup_worker, daemon=True)
+            thread.start()
+
         preloaded_data_start = ((counter + 1) // self.preload_size - 1) * self.preload_size
         preloaded_data_end = preloaded_data_start + self.preload_size
         
-        # we call additional thread here, this thread will make cleanup for us, to not stop main loop execution
-        cleanup_thread = threading.Thread(
-            target=self._cleanup_batch,
-            args=(preloaded_data_start, preloaded_data_end, data_to_iterate),
-            daemon=True
-        )
-        cleanup_thread.start()
+        self.cleanup_queue.put((preloaded_data_start, preloaded_data_end, data_to_iterate))
+
+    def _get_dir_size_gb(self, dir) -> float:
+        return sum(file.stat().st_size for file in Path(dir).rglob('*')) / self.GB_KOEF
+    
+    def get_cache_size_gb(self) -> float:
+        self.check_initialized()
+        cache = os.listdir(self.local_cache_dir)
+
+        cache_dirs = []
+        for object_ in cache:
+            path = Path(os.path.join(self.local_cache_dir, object_))
+            if path.is_dir():
+                cache_dirs.append(path)
+        
+        if cache_dirs:
+            cache_size_gb = sum(self._get_dir_size_gb(cache_dir) for cache_dir in cache_dirs)
+        else:
+            cache_size_gb = self._get_dir_size_gb(self.local_cache_dir)
+        return cache_size_gb
+
 
 class S3Manager:
     def __init__(
             self,
             s3_client: boto3.Session.client ,
-            local_cache_dir: str|Path ='../datasets/cache',
+            local_cache_dir: Union[str, Path]='../datasets/cache',
             max_load_workers: int =4,
             preload_size:int = 20,
             remaining_preloaded_threshold:int = 5,
-        ):
+        ) -> None:
         self.s3_client = s3_client
 
         self.need_preload = True
@@ -246,44 +281,44 @@ class S3Manager:
 
         self._init_cache_manager()
 
-    def _init_cache_manager(self):
+    def _init_cache_manager(self) -> None:
         self.cache_manager = CacheManager()
         self.cache_manager.set_s3_manager(self)
         self.cache_manager.init_from_s3manager()
         self.cache_manager.check_initialized()
 
-    def get_cache_manager(self):
+    def get_cache_manager(self) -> CacheManager:
         return self.cache_manager
 
-    def get_cache_dir(self) -> str|Path:
+    def get_cache_dir(self) -> Union[str, Path]:
         return self.local_cache_dir
 
-    def get_remaining_preloaded_threshold(self):
+    def get_remaining_preloaded_threshold(self) -> int:
         return self.remaining_preloaded_threshold
 
-    def get_preload_size(self):
+    def get_preload_size(self) -> int:
         return self.preload_size
 
-    def get_load_status(self):
+    def get_load_status(self) -> bool:
         with self.download_lock:
             return self.loading_in_process
     
-    def set_load_status(self, load_status: bool):
+    def set_load_status(self, load_status: bool) -> None:
         with self.download_lock:
             self.loading_in_process = load_status
 
-    def get_download_lock(self):
+    def get_download_lock(self) -> threading.Lock:
         return self.download_lock 
 
-    def get_file_status(self, local_path):
+    def get_file_status(self, local_path) -> DownloadStatus:
         with self.download_lock:
             return self.file_status.get(local_path, DownloadStatus.NOT_STARTED)
 
-    def set_file_status(self, local_path, status):
+    def set_file_status(self, local_path: str, status: DownloadStatus):
         with self.download_lock:
             self.file_status[local_path] = status    
 
-    def download_file(self, s3_path, local_path, is_last= False):
+    def download_file(self, s3_path: str, local_path: str, is_last: bool = False) -> bool:
         bucket, key = parse_s3_path(s3_path)
         if bucket is None:
             return False
@@ -319,7 +354,7 @@ class S3Manager:
                 self.set_load_status(False)
                 # self.loading_in_process = False
     
-    def load_next(self, data_to_iterate, current_counter):
+    def load_next(self, data_to_iterate: List[Dict[str, Any]], current_counter: int) -> None:
         start_idx = current_counter + 1
         end_idx = min(start_idx + self.preload_size, len(data_to_iterate))
 
@@ -353,7 +388,7 @@ class S3Manager:
             # self.loading_in_process = True
             print(f"Started {submitted_count} new loads")
 
-    def ensure_loaded(self, s3_path, timeout = 10) -> bool|str:
+    def ensure_loaded(self, s3_path: str, timeout: int = 10) -> Union[bool, str]:
         local_path = get_local_path(s3_path, self.local_cache_dir)
         status = self.get_file_status(local_path)
 
@@ -403,18 +438,18 @@ class S3Manager:
 class GLiClassAudioDataset(IterableDataset):
     def __init__(
             self,
-            dataset_path,
-            s3manager,
-            tokenizer,
-            max_length=512, 
-            problem_type='multi_label_classification', 
-            architecture_type = 'audio-encoder',
-            audio_features_extractor=None,
-            sampling_rate = 16000,
-            max_duration_s = 15, # seconds
-            shuffle_labels = True,
+            dataset_path: str|Path,
+            s3manager: S3Manager,
+            tokenizer: PreTrainedTokenizer,
+            max_length: int =512, 
+            problem_type: str ='multi_label_classification', 
+            architecture_type: str = 'audio-encoder',
+            audio_features_extractor: FeatureExtractionMixin =None,
+            sampling_rate: int= 16000,
+            max_duration_s: int = 15, # seconds
+            shuffle_labels: bool = True,
             **json_manger_kwargs 
-        ):
+        ) -> None:
         if architecture_type != 'audio-encoder':
             raise ValueError("This class was specifecly created for 'audio-encoder' arch")
         if audio_features_extractor is None:
@@ -444,7 +479,7 @@ class GLiClassAudioDataset(IterableDataset):
             jsonl_path= dataset_path,
             **json_manger_kwargs 
         )
-        self.num_examples = 1000#self.jsonl_manager.count_examples()
+        self.num_examples = 25000#self.jsonl_manager.count_examples()
 
         self.sampling_rate = sampling_rate
         self.max_duration_s = max_duration_s
@@ -453,10 +488,10 @@ class GLiClassAudioDataset(IterableDataset):
                 f"max_duration={self.max_duration_s}s, "
                 f"max_samples={self.max_duration_samples}")
         
-    def get_num_examples(self):
+    def get_num_examples(self) -> int:
         return self.num_examples
 
-    def prepare_labels(self, example, label2idx, problem_type):
+    def prepare_labels(self, example: Dict[str, Any], label2idx: Dict[str, int], problem_type: str) -> torch.Tensor:
         if problem_type == 'single_label_classification':
             labels = label2idx[example['true_labels'][0]]
         elif problem_type == 'multi_label_classification':
@@ -468,7 +503,7 @@ class GLiClassAudioDataset(IterableDataset):
             raise NotImplementedError(f"{problem_type} is not implemented.")
         return torch.tensor(labels)
 
-    def prepare_prompt(self, example):
+    def prepare_prompt(self, example: Dict[str, Any]) -> List[str]:
         prompt_texts = []
         for label in example['all_labels']:
             label_tag = f"<<LABEL>>{str(label)}"
@@ -476,7 +511,7 @@ class GLiClassAudioDataset(IterableDataset):
         prompt_texts.append('<<SEP>>')
         return prompt_texts
     
-    def prepare_audio(self, audio_array, audio_sr):
+    def prepare_audio(self, audio_array: Union[np.ndarray, torch.Tensor, List], audio_sr: int) -> Tuple[torch.Tensor, torch.Tensor]:
         if isinstance(audio_array, np.ndarray):
             audio_array = torch.from_numpy(audio_array).float()
         elif isinstance(audio_array, torch.Tensor):
@@ -500,11 +535,11 @@ class GLiClassAudioDataset(IterableDataset):
         )
         return audio_inputs["input_values"], audio_inputs["attention_mask"] 
     
-    def tokenize(self, texts):
+    def tokenize(self, texts) -> Dict[str, torch.Tensor]:
         tokenized_inputs = self.tokenizer(texts, truncation=True, max_length=self.max_length, padding="longest", return_tensors="pt")
         return tokenized_inputs
     
-    def tokenize_and_prepare_labels_for_audioencoder(self, example):
+    def tokenize_and_prepare_labels_for_audioencoder(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         if self.shuffle_labels:
             random.shuffle(example['all_labels'])
         input_text = self.prepare_prompt(example)
