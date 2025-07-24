@@ -19,7 +19,7 @@ import torch
 from gliclass import GLiClassModelConfig, GLiClassModel
 from gliclass.training import TrainingArguments, Trainer, AnalysisTrainer
 from gliclass.data_processing import DataCollatorWithPadding, GLiClassDataset
-from gliclass.audio_data_processing import GLiClassAudioDataset
+from gliclass.audio_data_processing import GLiClassAudioDataset, S3Manager
 
 
 
@@ -99,20 +99,20 @@ def main(args):
 
 
     model.config.problem_type = args.problem_type
-    with open(args.data_path, 'r') as f:
-        data = json.load(f)
-    data = [item for item in data if item['all_labels'] != []]
+    # with open(args.data_path, 'r') as f:
+        # data = json.load(f)
+    # data = [item for item in data if item['all_labels'] != []]
 
-    print('Dataset size:', len(data))
-    random.shuffle(data)    
-    print('Dataset is shuffled...')
+    # print('Dataset size:', len(data))
+    # random.shuffle(data)    
+    # print('Dataset is shuffled...')
 
-    train_data = data[:int(len(data)*0.9)]
-    train_data = train_data[:25000]
-    print("len(train_data): ", len(train_data))
-    test_data = data[int(len(data)*0.9):]
+    # train_data = data[:int(len(data)*0.9)]
+    # train_data = train_data[:1000]
+    # print("len(train_data): ", len(train_data))
+    # test_data = data[int(len(data)*0.9):]
 
-    print('Dataset is splitted...')
+    # print('Dataset is splitted...')
 
     s3_client = boto3.client(
         's3',
@@ -121,25 +121,47 @@ def main(args):
         region_name=os.getenv('AWS_DEFAULT_REGION')
     )
 
-    train_dataset = GLiClassAudioDataset(
-        train_data,
-        s3_client,
-        tokenizer,
-        args.max_length,
-        args.problem_type,
-        args.architecture_type,
-        args.prompt_first,
-        audio_features_extractor= audio_feature_extractor,
-        sampling_rate= args.sampling_rate,
-        max_duration_s=args.max_duration_s,
-        local_cache_dir= "./datasets/cache",
-        preload_size= 1000,
-        remaining_preloaded_threshold= 20
+    s3manager = S3Manager(
+        s3_client= s3_client,
+        local_cache_dir= "./datasets/cache", #TODO move to args
+        max_load_workers= 4,  #TODO move to args
+        preload_size= 1000, #TODO move to args
+        remaining_preloaded_threshold= 50 #TODO move to args
     )
+
+    train_dataset = GLiClassAudioDataset(
+        dataset_path= args.data_path,
+        s3manager= s3manager,
+        tokenizer= tokenizer,
+        audio_features_extractor= audio_feature_extractor,
+        max_length= args.max_length,
+        problem_type= args.problem_type,
+        architecture_type= args.architecture_type,
+        sampling_rate= args.sampling_rate,
+        max_duration_s= args.max_duration_s,
+        validate_json_file = True, #TODO move to args
+        buffer_size = 8192 #TODO move to args
+    )
+
+    # train_dataset = GLiClassAudioDataset(
+    #     train_data,
+    #     s3_client,
+    #     tokenizer,
+    #     args.max_length,
+    #     args.problem_type,
+    #     args.architecture_type,
+    #     args.prompt_first,
+    #     audio_features_extractor= audio_feature_extractor,
+    #     sampling_rate= args.sampling_rate,
+    #     max_duration_s=args.max_duration_s,
+    #     local_cache_dir= "./datasets/cache",
+    #     preload_size= 1000,
+    #     remaining_preloaded_threshold= 20
+    # )
 
     data_collator = DataCollatorWithPadding(device=device)
 
-    steps_per_epoch = len(train_data) // (args.batch_size * args.gradient_accumulation_steps)
+    steps_per_epoch = train_dataset.get_num_examples() // (args.batch_size * args.gradient_accumulation_steps)
     max_steps = steps_per_epoch * args.num_epochs
 
     training_args = TrainingArguments(
@@ -206,7 +228,7 @@ if __name__ == '__main__':
     parser.add_argument('--encoder_model_name', type=str, default = "microsoft/deberta-v3-base")
     parser.add_argument('--audio_model_name', type=str, default = "facebook/hubert-large-ls960-ft") # 
     parser.add_argument('--save_path', type=str, default = "./models/test_aws_dataset")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
-    parser.add_argument('--data_path', type=str, default =  "./datasets/annotations-short-merged.json")
+    parser.add_argument('--data_path', type=str, default =  "./datasets/annotations-short-merged.jsonl")
     parser.add_argument('--problem_type', type=str, default='multi_label_classification')
     parser.add_argument('--pooler_type', type=str, default='first')
     parser.add_argument('--scorer_type', type=str, default='audio-token-dot')
