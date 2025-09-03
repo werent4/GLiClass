@@ -479,7 +479,7 @@ class GLiClassAudioDataset(IterableDataset):
             jsonl_path= dataset_path,
             **json_manger_kwargs 
         )
-        self.num_examples = 25000#self.jsonl_manager.count_examples()
+        self.num_examples = 5000000#self.jsonl_manager.count_examples()
 
         self.sampling_rate = sampling_rate
         self.max_duration_s = max_duration_s
@@ -491,7 +491,7 @@ class GLiClassAudioDataset(IterableDataset):
     def get_num_examples(self) -> int:
         return self.num_examples
 
-    def prepare_labels(self, example: Dict[str, Any], label2idx: Dict[str, int], problem_type: str) -> torch.Tensor:
+    def prepare_labels(self, example: Dict[str, Any], label2idx: Dict[str, int], problem_type: str, worker_id) -> torch.Tensor:
         if problem_type == 'single_label_classification':
             labels = label2idx[example['true_labels'][0]]
         elif problem_type == 'multi_label_classification':
@@ -529,17 +529,17 @@ class GLiClassAudioDataset(IterableDataset):
             audio_array, 
             sampling_rate=self.sampling_rate,
             return_tensors="pt",
-            padding="longest",
+            padding="max_length",
             truncation=True, 
             max_length=self.max_duration_samples  
         )
-        return audio_inputs["input_values"], audio_inputs["attention_mask"] 
+        return audio_inputs["input_values"], audio_inputs["attention_mask"]  
     
     def tokenize(self, texts) -> Dict[str, torch.Tensor]:
-        tokenized_inputs = self.tokenizer(texts, truncation=True, max_length=self.max_length, padding="longest", return_tensors="pt")
+        tokenized_inputs = self.tokenizer(texts, truncation=True, max_length=self.max_length, padding="max_length", return_tensors="pt")
         return tokenized_inputs
     
-    def tokenize_and_prepare_labels_for_audioencoder(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    def tokenize_and_prepare_labels_for_audioencoder(self, example: Dict[str, Any], worker_id) -> Dict[str, torch.Tensor]:
         if self.shuffle_labels:
             random.shuffle(example['all_labels'])
         input_text = self.prepare_prompt(example)
@@ -549,8 +549,7 @@ class GLiClassAudioDataset(IterableDataset):
         
 
         tokenized_inputs = self.tokenize(input_text)
-        tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type)
-        # tokenized_inputs['labels_text'] =  example['all_labels']
+        tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type, worker_id)
 
         audio_data = torch.load(example['audio_path'], weights_only=False)
         audio_sr = example["sample_rate"]
@@ -560,16 +559,34 @@ class GLiClassAudioDataset(IterableDataset):
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            rank = torch.distributed.get_rank()
+            
+            per_process = int(np.ceil(self.num_examples / float(world_size)))
+            process_start = rank * per_process
+            process_end = min(process_start + per_process, self.num_examples)
+            
+            print(f"Process rank: {rank}/{world_size}, data range: [{process_start}: {process_end}]")
+        else:
+            process_start = 0
+            process_end = self.num_examples
+            rank = 0
+
+        process_data_size = process_end - process_start
+
         if worker_info is None:
             worker_id = "main"
-            data_to_iterate = list(self.jsonl_manager.get_data_slice_generator(0))
+            worker_start = process_start
+            worker_end = process_end
         else:
-            per_worker = int(np.ceil(self.num_examples / float(worker_info.num_workers)))
+            per_worker = int(np.ceil(process_data_size / float(worker_info.num_workers)))
             worker_id = worker_info.id
-            iter_start = worker_id * per_worker
-            iter_end = min(iter_start + per_worker, self.num_examples)
-            print(f"worker_id: {worker_id}, [{iter_start}: {iter_end}]")
-            data_to_iterate = list(self.jsonl_manager.get_data_slice_generator(iter_start, iter_end))
+            worker_start = process_start + (worker_id * per_worker)
+            worker_end = min(worker_start + per_worker, process_end)
+
+        print(f"Process {rank}, worker_id: {worker_id}, final range: [{worker_start}: {worker_end}]")
+        data_to_iterate = list(self.jsonl_manager.get_data_slice_generator(worker_start, worker_end))
 
         self.s3manager.load_next(data_to_iterate, -1)
         last_preloaded_index = min(self.preload_size - 1, len(data_to_iterate) - 1)
@@ -593,7 +610,7 @@ class GLiClassAudioDataset(IterableDataset):
                 last_preloaded_index = new_last_preloaded
                 self.need_preload = False
             
-            result = self.tokenize_and_prepare_labels_for_audioencoder(example)
+            result = self.tokenize_and_prepare_labels_for_audioencoder(example, worker_id)
 
             self.cache_manager.mark_file_as_processed(local_path)
             if counter >= self.preload_size - 1 and (counter + 1) % self.preload_size == 0:

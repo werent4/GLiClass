@@ -53,7 +53,7 @@ def compute_metrics(p):
         raise NotImplementedError(f"{args.problem_type} is not implemented.")
 
 def main(args):
-    load_dotenv("..")
+    load_dotenv()
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
     if args.model_name is not None:
@@ -99,20 +99,6 @@ def main(args):
 
 
     model.config.problem_type = args.problem_type
-    # with open(args.data_path, 'r') as f:
-        # data = json.load(f)
-    # data = [item for item in data if item['all_labels'] != []]
-
-    # print('Dataset size:', len(data))
-    # random.shuffle(data)    
-    # print('Dataset is shuffled...')
-
-    # train_data = data[:int(len(data)*0.9)]
-    # train_data = train_data[:1000]
-    # print("len(train_data): ", len(train_data))
-    # test_data = data[int(len(data)*0.9):]
-
-    # print('Dataset is splitted...')
 
     s3_client = boto3.client(
         's3',
@@ -123,10 +109,10 @@ def main(args):
 
     s3manager = S3Manager(
         s3_client= s3_client,
-        local_cache_dir= "./datasets/cache", #TODO move to args
-        max_load_workers= 4,  #TODO move to args
-        preload_size= 1000, #TODO move to args
-        remaining_preloaded_threshold= 50 #TODO move to args
+        local_cache_dir= "./cache", #TODO move to args
+        max_load_workers= 8,  #TODO move to args
+        preload_size= 2000, #TODO move to args
+        remaining_preloaded_threshold= 100, #0 #TODO move to args
     )
 
     train_dataset = GLiClassAudioDataset(
@@ -143,25 +129,12 @@ def main(args):
         buffer_size = 8192 #TODO move to args
     )
 
-    # train_dataset = GLiClassAudioDataset(
-    #     train_data,
-    #     s3_client,
-    #     tokenizer,
-    #     args.max_length,
-    #     args.problem_type,
-    #     args.architecture_type,
-    #     args.prompt_first,
-    #     audio_features_extractor= audio_feature_extractor,
-    #     sampling_rate= args.sampling_rate,
-    #     max_duration_s=args.max_duration_s,
-    #     local_cache_dir= "./datasets/cache",
-    #     preload_size= 1000,
-    #     remaining_preloaded_threshold= 20
-    # )
-
     data_collator = DataCollatorWithPadding(device=device)
 
-    steps_per_epoch = train_dataset.get_num_examples() // (args.batch_size * args.gradient_accumulation_steps)
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    total_examples = train_dataset.get_num_examples()
+    effective_batch_size = args.batch_size * args.gradient_accumulation_steps * world_size
+    steps_per_epoch = total_examples // effective_batch_size
     max_steps = steps_per_epoch * args.num_epochs
 
     training_args = TrainingArguments(
@@ -183,10 +156,11 @@ def main(args):
         save_steps = args.save_steps,
         save_total_limit=args.save_total_limit,
         dataloader_num_workers = args.num_workers,
-        logging_steps=100,
+        logging_steps=5,#100,
         use_cpu = False,
         report_to="none",
         fp16=args.fp16,
+        accelerator_config={'dispatch_batches': False}
         )
     
     args_to_save = {
@@ -227,8 +201,8 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default= None)
     parser.add_argument('--encoder_model_name', type=str, default = "microsoft/deberta-v3-base")
     parser.add_argument('--audio_model_name', type=str, default = "facebook/hubert-large-ls960-ft") # 
-    parser.add_argument('--save_path', type=str, default = "./models/test_aws_dataset")#'models/part-final-gliclass-audio-bi-1-lrs-5e-5-wds-0.015-red-sum-alpha-0.7-cl-0.01')
-    parser.add_argument('--data_path', type=str, default =  "./datasets/annotations-short-merged.jsonl")
+    parser.add_argument('--save_path', type=str, default = "./models/10M-gliclas-hu-audio-base")
+    parser.add_argument('--data_path', type=str, default =  "./data/gliclass-audio-10M.jsonl")
     parser.add_argument('--problem_type', type=str, default='multi_label_classification')
     parser.add_argument('--pooler_type', type=str, default='first')
     parser.add_argument('--scorer_type', type=str, default='audio-token-dot')
@@ -241,7 +215,7 @@ if __name__ == '__main__':
     parser.add_argument('--shuffle_labels', type=bool, default=True)
     parser.add_argument('--num_epochs', type=int, default=1) #££££££££££££££
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=8)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
     parser.add_argument('--encoder_lr', type=float, default=1e-5)
     parser.add_argument('--audio_lr', type=float, default=1e-5)
     parser.add_argument('--others_lr', type=float, default=1e-5)
@@ -253,12 +227,12 @@ if __name__ == '__main__':
     parser.add_argument('--focal_loss_alpha', type=float, default=0.6)
     parser.add_argument('--focal_loss_gamma', type=float, default=2)
     parser.add_argument('--contrastive_loss_coef', type=float, default=0.)
-    parser.add_argument('--max_length', type=int, default=2048)
+    parser.add_argument('--max_length', type=int, default=1536)
     parser.add_argument('--sampling_rate', type= int, default= 16000)
     parser.add_argument('--max_duration_s', type= int, default= 15, help="Max allowed duration of audio segment in seconds")
     parser.add_argument('--save_steps', type=int, default=5000)
     parser.add_argument('--save_total_limit', type=int, default=15)
-    parser.add_argument('--num_workers', type=int, default=6)
+    parser.add_argument('--num_workers', type=int, default=1)
     parser.add_argument('--fp16', type=bool, default=False)
     args = parser.parse_args()
 
