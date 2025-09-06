@@ -14,6 +14,7 @@ from transformers import ZeroShotClassificationPipeline as TransformersClassific
 from .utils import default_f1_reward
 from .pipeline import ZeroShotClassificationPipeline
 from collections import defaultdict
+from lion_pytorch import Lion
 
 
 def get_component_name(param_name):
@@ -204,60 +205,6 @@ class Trainer(transformers.Trainer):
         Return:
             `torch.Tensor`: The tensor with training loss on this batch.
         """
-        rank = self.accelerator.local_process_index
-        step = self.state.global_step
-        device = self.args.device
-        world_size = self.accelerator.num_processes
-
-        # --- skip on missing audio token ---
-        skip_local = False
-        
-        if "input_ids" in inputs and isinstance(inputs["input_ids"], torch.Tensor):
-            ids = inputs["input_ids"]
-            if ids.dim() > 2:
-                ids = ids.squeeze(1)
-            
-            if ids.dim() == 2:
-                has_audio_per_row = (ids == self.audio_token_id).any(dim=1)  # [B]
-                if not bool(has_audio_per_row.all()):
-                    missing = (~has_audio_per_row).nonzero(as_tuple=True)[0].tolist()
-                    print(f"Rank {rank}: will skip batch; missing audio token in rows {missing}")
-                    skip_local = True
-            else:
-                print(f"Rank {rank}: unexpected input_ids shape: {ids.shape}")
-                skip_local = True
-
-        if world_size > 1:
-            t = torch.tensor(1.0 if skip_local else 0.0, device=device)
-            handle = torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MAX, async_op=True)
-            handle.wait()
-            skip_global = t.item() > 0
-        else:
-            skip_global = skip_local
-
-        if skip_global:
-            model.zero_grad(set_to_none=True)
-            if hasattr(self, 'optimizer') and self.optimizer is not None:
-                self.optimizer.zero_grad(set_to_none=True)
-            
-            if world_size > 1:
-                if torch.cuda.is_available():
-                    torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
-                else:
-                    torch.distributed.barrier()
-
-            if not hasattr(self, 'skipped_batches'): 
-                self.skipped_batches = 0
-            self.skipped_batches += 1
-            
-            if self.skipped_batches % 50 == 0:
-                print(f"Rank {rank}: skipped {self.skipped_batches} batches so far")
-
-            return torch.tensor(0.0, device=device, requires_grad=False)        
-
-        local_error = torch.tensor(0.0, device=self.args.device)
-        loss = None
-
         model.train()
         try:
             # with torch.autograd.set_detect_anomaly(True):
@@ -446,6 +393,17 @@ class Trainer(transformers.Trainer):
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+
+            # lion_kwargs = {}
+            # valid_lion_params = {'lr', 'betas', 'weight_decay'}
+            # for key, value in optimizer_kwargs.items():
+            #     if key in valid_lion_params:
+            #         lion_kwargs[key] = value
+            
+            # if 'betas' not in lion_kwargs:
+            #     lion_kwargs['betas'] = (0.9, 0.99) 
+
+            # self.optimizer = Lion(optimizer_grouped_parameters, **lion_kwargs)
 
         return self.optimizer
 

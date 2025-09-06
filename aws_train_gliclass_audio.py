@@ -1,5 +1,6 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from dotenv import load_dotenv
 import boto3
 import numpy as np
@@ -138,6 +139,7 @@ def main(args):
     max_steps = steps_per_epoch * args.num_epochs
 
     training_args = TrainingArguments(
+        dataloader_pin_memory=False,
         output_dir=args.save_path,
         learning_rate=args.encoder_lr,
         weight_decay=args.encoder_weight_decay,
@@ -149,10 +151,9 @@ def main(args):
         warmup_ratio=args.warmup_ratio,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         per_device_train_batch_size=args.batch_size,
-        # per_device_eval_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
         max_steps=max_steps,
         num_train_epochs=args.num_epochs,
-        # evaluation_strategy="epoch",
         save_steps = args.save_steps,
         save_total_limit=args.save_total_limit,
         dataloader_num_workers = args.num_workers,
@@ -160,7 +161,12 @@ def main(args):
         use_cpu = False,
         report_to="none",
         fp16=args.fp16,
-        accelerator_config={'dispatch_batches': False}
+        bf16=args.bf16,
+        accelerator_config={
+            'dispatch_batches': False,
+            'split_batches': False,
+            'even_batches': True,    
+        }
         )
     
     args_to_save = {
@@ -227,13 +233,14 @@ if __name__ == '__main__':
     parser.add_argument('--focal_loss_alpha', type=float, default=0.6)
     parser.add_argument('--focal_loss_gamma', type=float, default=2)
     parser.add_argument('--contrastive_loss_coef', type=float, default=0.)
-    parser.add_argument('--max_length', type=int, default=1536)
+    parser.add_argument('--max_length', type=int, default=2048)
     parser.add_argument('--sampling_rate', type= int, default= 16000)
     parser.add_argument('--max_duration_s', type= int, default= 15, help="Max allowed duration of audio segment in seconds")
     parser.add_argument('--save_steps', type=int, default=5000)
     parser.add_argument('--save_total_limit', type=int, default=15)
     parser.add_argument('--num_workers', type=int, default=1)
     parser.add_argument('--fp16', type=bool, default=False)
+    parser.add_argument('--bf16', type=bool, default=True)
     args = parser.parse_args()
 
     main(args)
