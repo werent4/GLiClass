@@ -725,7 +725,7 @@ class GLiClassAudio(GLiClassBaseModel):
 
         # Create final tensors
         final_embeddings = torch.zeros(batch_size, new_seq_len, hidden_size, 
-                                    dtype=text_embeddings.dtype, device=device)
+                                    dtype=audio_embeddings.dtype, device=device)
         final_attention_mask = torch.zeros(batch_size, new_seq_len, 
                                         dtype=attention_mask.dtype, device=device)
         final_input_ids = torch.zeros(batch_size, new_seq_len, 
@@ -831,7 +831,7 @@ class GLiClassAudio(GLiClassBaseModel):
         input_ids = input_ids.squeeze(1)
         attention_mask = attention_mask.squeeze(1)
         embedding_layer = self.encoder_model.get_input_embeddings()
-        text_embeddings = embedding_layer(input_ids) #[batch, seq, hidden]
+        text_embeddings = embedding_layer(input_ids).to(audio_embeddings.dtype) #[batch, seq, hidden]
 
         inputs_embeds, attention_mask, input_ids = self.insert_audio_embeddings(text_embeddings, input_ids, attention_mask, audio_embeddings, audio_mask_downsampled)
         outputs = self.encoder_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
