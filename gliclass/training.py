@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Dict, List, Union, Any, Callable
 from tqdm import tqdm
 import numpy as np
 import os
+
 from dataclasses import dataclass, field
 import torch
 from transformers.trainer import (
@@ -15,7 +16,7 @@ from .utils import default_f1_reward
 from .pipeline import ZeroShotClassificationPipeline
 from collections import defaultdict
 from lion_pytorch import Lion
-
+import torch.distributed as dist
 
 def get_component_name(param_name):
     if 'audio_encoder' in param_name:
@@ -188,67 +189,47 @@ class Trainer(transformers.Trainer):
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<<AUDIO>>") if hasattr(self, 'tokenizer') else None
 
     def training_step(self, model, inputs, *args, **kwargs) -> torch.Tensor:
-        """
-        Perform a training step on a batch of inputs.
-
-        Subclass and override to inject custom behavior.
-
-        Args:
-            model (`nn.Module`):
-                The model to train.
-            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
-                The inputs and targets of the model.
-
-                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
-                argument `labels`. Check your model's documentation for all accepted arguments.
-
-        Return:
-            `torch.Tensor`: The tensor with training loss on this batch.
-        """
         model.train()
+        loss = None
+        error_flag = torch.tensor(0, device=self.args.device)
         try:
-            # with torch.autograd.set_detect_anomaly(True):
             if "labels_text" in inputs:
-                labels_text = inputs.pop('labels_text')
+                            labels_text = inputs.pop('labels_text')
             if "input_texts" in inputs:
-                input_texts = inputs.pop('input_texts')
+                            input_texts = inputs.pop('input_texts')
+            if "original_seq_len" in inputs:
+                            original_seq_len = inputs.pop('original_seq_len')
+            print(f"original_seq_len: {original_seq_len}")
             inputs = self._prepare_inputs(inputs)
             if is_sagemaker_mp_enabled():
                 loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
                 return loss_mb.reduce_mean().detach().to(self.args.device)
-
             with self.compute_loss_context_manager():
-                loss = self.compute_loss(model, inputs)
-
-            if hasattr(self, '_step_counter'):
-                self._step_counter += 1
-            else:
-                self._step_counter = 1
-
-            del inputs
-            torch.cuda.empty_cache()
-
-            kwargs = {}
-
-            # For LOMO optimizers you need to explicitly use the learnign rate
-            # if self.args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
-            #     kwargs["learning_rate"] = self._get_learning_rate()
-
-            if self.args.n_gpu > 1:
-                loss = loss.mean()  # mean() to average on multi-gpu parallel training
-
-            if self.use_apex:
-                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                self.accelerator.backward(loss, **kwargs)
-
-            return loss.detach() / self.args.gradient_accumulation_steps
+                loss = self.compute_loss(model, inputs)  
         except Exception as e:
             print(f"Skipping iteration due to error: {e}")
-            model.zero_grad(set_to_none=True)
-            torch.cuda.empty_cache()
-            return torch.tensor(0.0, requires_grad=True).to(model.device)
+            error_flag = torch.tensor(1, device=self.args.device)
+        if torch.distributed.is_initialized():
+                    torch.distributed.all_reduce(error_flag, op=torch.distributed.ReduceOp.MAX)
+        if error_flag.item() > 0:
+                    model.zero_grad(set_to_none=True)
+                    torch.cuda.empty_cache()
+                    return torch.tensor(0.0, device=self.args.device)
+        if hasattr(self, '_step_counter'):
+            self._step_counter += 1
+        else:
+            self._step_counter = 1
+        del inputs
+        torch.cuda.empty_cache()
+        kwargs = {}
+        if self.args.n_gpu > 1:
+            loss = loss.mean()
+        if self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            self.accelerator.backward(loss, **kwargs)
+        return loss.detach() / self.args.gradient_accumulation_steps
         
     def prediction_step(
         self,
