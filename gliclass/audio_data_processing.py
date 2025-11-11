@@ -736,6 +736,8 @@ class GLiClassAudioDataset(IterableDataset):
         sampling_rate: int = 16000,
         max_duration_s: int = 15,
         shuffle_labels: bool = True,
+        rank = None,
+        world_size = -1,
         **json_manger_kwargs
     ) -> None:
         if architecture_type != 'audio-encoder':
@@ -745,6 +747,8 @@ class GLiClassAudioDataset(IterableDataset):
         if sampling_rate is None or max_duration_s is None:
             raise ValueError("When using audio_features_extractor you must specify sampling_rate and max_duration_s")
 
+        self.rank = rank
+        self.world_size = world_size
         self.cloud_manager = cloud_manager
         self.preload_size = self.cloud_manager.get_preload_size()
         self.remaining_preloaded_threshold = self.cloud_manager.get_remaining_preloaded_threshold()
@@ -760,7 +764,7 @@ class GLiClassAudioDataset(IterableDataset):
         self.shuffle_labels = shuffle_labels
 
         self.jsonl_manager = JSONLManager(jsonl_path=dataset_path, **json_manger_kwargs)
-        self.num_examples = 566
+        self.num_examples = self.jsonl_manager.count_examples()
 
         self.sampling_rate = sampling_rate
         self.max_duration_s = max_duration_s
@@ -840,29 +844,35 @@ class GLiClassAudioDataset(IterableDataset):
         
         return tokenized_inputs
 
+    def __len__(self):
+        if self.world_size > 1:
+            return np.ceil(self.num_examples / self.world_size)
+        return self.num_examples
+
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
-        
-        if torch.distributed.is_initialized():
-            world_size = torch.distributed.get_world_size()
-            rank = torch.distributed.get_rank()
-            per_process = int(np.ceil(self.num_examples / float(world_size)))
-            process_start = rank * per_process
+
+        if self.rank is not None and self.world_size > 1:
+            per_process = int(np.ceil(self.num_examples / float(self.world_size)))
+            process_start = self.rank * per_process
             process_end = min(process_start + per_process, self.num_examples)
         else:
-            process_start, process_end, rank = 0, self.num_examples, 0
+            process_start = 0
+            process_end = self.num_examples
         
         process_data_size = process_end - process_start
         
         if worker_info is None:
             worker_id = "main"
-            worker_start, worker_end = process_start, process_end
+            worker_start = process_start
+            worker_end = process_end
         else:
-            per_worker = int(np.ceil(process_data_size / float(worker_info.num_workers)))
+            num_workers = worker_info.num_workers
             worker_id = worker_info.id
-            worker_start = process_start + (worker_id * per_worker)
+            per_worker = int(np.ceil(process_data_size / float(num_workers)))
+            worker_start = process_start + (worker_id * per_worker) 
             worker_end = min(worker_start + per_worker, process_end)
-        
+
         data_to_iterate = list(self.jsonl_manager.get_data_slice_generator(worker_start, worker_end))
         
         max_cache_bytes = self.cache_manager.get_max_cache_bytes()
@@ -879,7 +889,7 @@ class GLiClassAudioDataset(IterableDataset):
                 warnings.warn(f"Skipping {counter}: {Path(local_path).name}", UserWarning)
                 continue
             example['audio_path'] = local_path
-            result = self.tokenize_and_prepare_labels_for_audioencoder(example, worker_id)
+            result = self.tokenize_and_prepare_labels_for_audioencoder(example, self.rank)
             self.cache_manager.mark_file_as_processed(local_path)
             
             remaining_preloaded = last_preloaded_index - counter
@@ -931,5 +941,4 @@ class GLiClassAudioDataset(IterableDataset):
                 
                 self.cloud_manager.load_next(data_to_iterate, old_index, dynamic_size=actual_loaded)
                 self.need_preload = False
-            
             yield result

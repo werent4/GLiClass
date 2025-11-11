@@ -3,6 +3,7 @@ from tqdm import tqdm
 import numpy as np
 import os
 
+from gliclass.audio_data_processing import GLiClassAudioDataset
 from dataclasses import dataclass, field
 import torch
 from transformers.trainer import (
@@ -15,7 +16,8 @@ from transformers import ZeroShotClassificationPipeline as TransformersClassific
 from .utils import default_f1_reward
 from .pipeline import ZeroShotClassificationPipeline
 from collections import defaultdict
-from lion_pytorch import Lion
+# from lion_pytorch import Lion
+from torch.utils.data import DataLoader
 import torch.distributed as dist
 
 def get_component_name(param_name):
@@ -187,6 +189,40 @@ class Trainer(transformers.Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<<AUDIO>>") if hasattr(self, 'tokenizer') else None
+
+    def get_train_dataloader(self):
+        if isinstance(self.train_dataset, dict) and dist.get_world_size() > 1:
+            print("Creating Dataset inside trainer...")
+            print(f"Distributed world size: {dist.get_world_size()}, rank: {dist.get_rank()}")
+
+            config = self.train_dataset
+            self.train_dataset = GLiClassAudioDataset(
+                dataset_path= config["dataset_path"],
+                cloud_manager= config["cloud_manager"],
+                tokenizer= config["tokenizer"],
+                audio_features_extractor= config["audio_features_extractor"],
+                max_length= config["max_length"],
+                problem_type= config["problem_type"],
+                architecture_type= config["architecture_type"],
+                sampling_rate= config["sampling_rate"],
+                max_duration_s= config["max_duration_s"],
+                validate_json_file= config["validate_json_file"],
+                buffer_size= config["buffer_size"],
+                rank = dist.get_rank(),
+                world_size = dist.get_world_size()
+            )
+            dataloader = DataLoader(
+                self.train_dataset,
+                batch_size=self.args.per_device_train_batch_size,
+                num_workers=self.args.dataloader_num_workers,
+                prefetch_factor=self.args.dataloader_prefetch_factor,
+                pin_memory=self.args.dataloader_pin_memory,
+                collate_fn=self.data_collator,
+            )
+            return dataloader
+        return super().get_train_dataloader()
+
+
 
     def training_step(self, model, inputs, *args, **kwargs) -> torch.Tensor:
         model.train()

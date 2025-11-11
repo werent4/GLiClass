@@ -23,7 +23,7 @@ from transformers.models.clap.configuration_clap import ClapConfig
 from gliclass import GLiClassModelConfig, GLiClassModel
 from gliclass.training import TrainingArguments, Trainer
 from gliclass.data_processing import DataCollatorWithPadding
-from gliclass.audio_data_processing import GLiClassAudioDataset, S3Manager
+from gliclass.audio_data_processing import GLiClassAudioDataset, S3Manager, JSONLManager
 
 
 class Args:
@@ -31,7 +31,7 @@ class Args:
     encoder_model_name = "microsoft/deberta-v3-base"
     audio_model_name = "facebook/hubert-large-ls960-ft"
     save_path = "./models/gliclass-hu-audio-base"
-    data_path = "/home/aleksandrlukasov/multi_gpu_gliclass_audio/sampled.jsonl"
+    data_path = "/home/aleksandrlukasov/multi_gpu_gliclass_audio/output.jsonl"
     problem_type = "multi_label_classification"
     pooler_type = "first"
     scorer_type = "audio-token-dot"
@@ -71,7 +71,7 @@ random.seed(42)
 
 if not os.path.exists(args.data_path):
     raise FileNotFoundError(f"Dataset file not found: {args.data_path}")
-print(f"✓ Dataset file exists: {args.data_path}")
+print(f"Dataset file exists: {args.data_path}")
 
 client = storage.Client()
 gcs_manager = GCSManager(
@@ -123,20 +123,39 @@ new_words = ["<<LABEL>>", "<<SEP>>", "<<AUDIO>>"]
 tokenizer.add_tokens(new_words, special_tokens=True)
 model.resize_token_embeddings(len(tokenizer))
 
+world_size = int(os.environ.get("WORLD_SIZE", 1))
+
 print("Creating dataset...")
-train_dataset = GLiClassAudioDataset(
-    dataset_path=args.data_path,
-    cloud_manager=gcs_manager,
-    tokenizer=tokenizer,
-    audio_features_extractor=audio_feature_extractor,
-    max_length=args.max_length,
-    problem_type=args.problem_type,
-    architecture_type=args.architecture_type,
-    sampling_rate=args.sampling_rate,
-    max_duration_s=args.max_duration_s,
-    validate_json_file=True,
-    buffer_size=8192,
-)
+if world_size > 1:
+    train_dataset = {
+        "dataset_path": args.data_path,
+        "cloud_manager": gcs_manager,
+        "tokenizer": tokenizer,
+        "audio_features_extractor": audio_feature_extractor,
+        "max_length": args.max_length,
+        "problem_type": args.problem_type,
+        "architecture_type": args.architecture_type,
+        "sampling_rate": args.sampling_rate,
+        "max_duration_s": args.max_duration_s,
+        "validate_json_file": True,
+        "buffer_size": 8192
+    }
+    total_examples = JSONLManager(args.data_path, True).count_examples()
+else:
+    train_dataset = GLiClassAudioDataset(
+        dataset_path=args.data_path,
+        cloud_manager=gcs_manager,
+        tokenizer=tokenizer,
+        audio_features_extractor=audio_feature_extractor,
+        max_length=args.max_length,
+        problem_type=args.problem_type,
+        architecture_type=args.architecture_type,
+        sampling_rate=args.sampling_rate,
+        max_duration_s=args.max_duration_s,
+        validate_json_file=True,
+        buffer_size=8192,
+    )
+    total_examples = train_dataset.get_num_examples()
 
 data_collator = DataCollatorWithPadding(device=device)
 
@@ -156,9 +175,6 @@ def compute_metrics(p):
     accuracy = accuracy_score(labels, preds)
     return {"accuracy": accuracy, "precision": precision, "recall": recall, "f1": f1}
 
-
-world_size = int(os.environ.get("WORLD_SIZE", 1))
-total_examples = train_dataset.get_num_examples()
 
 print("\n" + "="*60)
 print("TRAINING CONFIGURATION")
@@ -205,7 +221,6 @@ training_args = TrainingArguments(
     per_device_train_batch_size=args.batch_size,
     per_device_eval_batch_size=args.batch_size,
     max_steps=max_steps,
-    num_train_epochs=args.num_epochs,
     save_steps=args.save_steps,
     save_total_limit=args.save_total_limit,
     dataloader_num_workers=args.num_workers,
