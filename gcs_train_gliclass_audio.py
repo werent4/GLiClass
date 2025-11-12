@@ -249,6 +249,7 @@ training_args = TrainingArguments(
     dataloader_num_workers=args.num_workers,
     logging_steps=1,
     use_cpu=not torch.cuda.is_available(),
+    use_stable_adam=args.use_stable_adam,
     report_to="none",
     fp16=args.fp16,
     bf16=args.bf16,

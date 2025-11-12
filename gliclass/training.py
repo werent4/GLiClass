@@ -184,6 +184,7 @@ class TrainingArguments(transformers.TrainingArguments):
     others_weight_decay: Optional[float] = 0.0
     audio_lr: Optional[float] = None 
     audio_weight_decay: Optional[float] = 0.0
+    use_stable_adam: bool = False
 
 class Trainer(transformers.Trainer):
     def __init__(self, *args, **kwargs):
@@ -442,7 +443,18 @@ class Trainer(transformers.Trainer):
                 self.optimizer = StableAdamW(optimizer_grouped_parameters, **stable_adam_kwargs)
             else:
                 self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-
+        print("\n" + "="*80)
+        print(f"Optimizer: {type(self.optimizer).__name__}")
+        print(f"Defaults: {self.optimizer.defaults}")
+        print(f"\nParameter groups ({len(self.optimizer.param_groups)}):")
+        for i, group in enumerate(self.optimizer.param_groups):
+            print(f"\n  Group {i}:")
+            print(f"    lr: {group['lr']}")
+            print(f"    weight_decay: {group['weight_decay']}")
+            print(f"    betas: {group.get('betas', group.get('beta1', 'N/A'))}")
+            print(f"    eps: {group.get('eps', 'N/A')}")
+            print(f"    params: {len(group['params'])} tensors, {sum(p.numel() for p in group['params']):,} elements")
+        print("="*80 + "\n")
         return self.optimizer
 
 @dataclass
