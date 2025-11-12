@@ -2,7 +2,7 @@ from typing import Optional, Tuple, Dict, List, Union, Any, Callable
 from tqdm import tqdm
 import numpy as np
 import os
-
+from optimi import StableAdamW
 from gliclass.audio_data_processing import GLiClassAudioDataset
 from dataclasses import dataclass, field
 import torch
@@ -255,7 +255,7 @@ class Trainer(transformers.Trainer):
                 torch.distributed.all_reduce(error_flag, op=torch.distributed.ReduceOp.MAX)
             
             if error_flag.item() > 0:
-                model.zero_grad(set_to_none=True)
+                model.zero_grad()
                 torch.cuda.empty_cache()
                 return torch.tensor(0.0, requires_grad=True).to(self.args.device)
             
@@ -281,7 +281,7 @@ class Trainer(transformers.Trainer):
 
         except Exception as e:
             print(f"Skipping iteration due to error in backward: {e}")
-            model.zero_grad(set_to_none=True)
+            model.zero_grad()
             torch.cuda.empty_cache()
             return torch.tensor(0.0, requires_grad=True).to(self.args.device)
         
@@ -357,6 +357,7 @@ class Trainer(transformers.Trainer):
             audio_encoder_parameters = [name for name, _ in opt_model.named_parameters() if "audio_encoder" in name]
             text_encoder_parameters = [name for name, _ in opt_model.named_parameters() if "encoder" in name and "audio_encoder" not in name]
             optimizer_grouped_parameters = []
+            
             # text encoder
             optimizer_grouped_parameters.extend([
                     {
@@ -375,11 +376,11 @@ class Trainer(transformers.Trainer):
             
             # audio encoder
             if self.args.audio_lr is not None:
-                 optimizer_grouped_parameters.extend([{
+                optimizer_grouped_parameters.extend([{
                         "params": [
                             p for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in text_encoder_parameters and n in audio_encoder_parameters and p.requires_grad)
                         ],
-                        "weight_decay": self.args.others_weight_decay,
+                        "weight_decay": self.args.audio_weight_decay,
                         "lr": self.args.audio_lr,
                     },
                     {
@@ -426,19 +427,21 @@ class Trainer(transformers.Trainer):
                 ]
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
-
-            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-
-            # lion_kwargs = {}
-            # valid_lion_params = {'lr', 'betas', 'weight_decay'}
-            # for key, value in optimizer_kwargs.items():
-            #     if key in valid_lion_params:
-            #         lion_kwargs[key] = value
             
-            # if 'betas' not in lion_kwargs:
-            #     lion_kwargs['betas'] = (0.9, 0.99) 
-
-            # self.optimizer = Lion(optimizer_grouped_parameters, **lion_kwargs)
+            use_stable_adam = getattr(self.args, 'use_stable_adam', False)
+            
+            if use_stable_adam:
+                from optimi import StableAdamW
+                
+                stable_adam_kwargs = {
+                    'lr': optimizer_kwargs.get('lr', self.args.learning_rate),
+                    'betas': optimizer_kwargs.get('betas', (0.9, 0.999)),
+                    'eps': optimizer_kwargs.get('eps', 1e-8),
+                }
+                
+                self.optimizer = StableAdamW(optimizer_grouped_parameters, **stable_adam_kwargs)
+            else:
+                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
 
         return self.optimizer
 

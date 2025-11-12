@@ -4,6 +4,7 @@ from google.cloud import storage
 from tqdm import tqdm
 import time
 from pathlib import Path
+from transformers import TrainerCallback
 from transformers import AutoTokenizer, AutoFeatureExtractor
 from gliclass.audio_data_processing import GLiClassAudioDataset
 import os
@@ -30,8 +31,7 @@ class Args:
     model_name = None
     encoder_model_name = "microsoft/deberta-v3-base"
     audio_model_name = "facebook/hubert-large-ls960-ft"
-    save_path = "./models/gliclass-hu-audio-base"
-    data_path = "/home/aleksandrlukasov/multi_gpu_gliclass_audio/output.jsonl"
+    data_path = "/home/aleksandrlukasov/multi_gpu_gliclass_audio/sampled_1m.jsonl"
     problem_type = "multi_label_classification"
     pooler_type = "first"
     scorer_type = "audio-token-dot"
@@ -45,12 +45,12 @@ class Args:
     num_epochs = 1
     batch_size = 1
     gradient_accumulation_steps = 1
-    encoder_lr = 1e-5
-    audio_lr = 1e-5
+    encoder_lr = 1e-3
+    audio_lr = 1e-4
     others_lr = 1e-5
-    encoder_weight_decay = 0.015
-    audio_weight_decay = 0.015
-    others_weight_decay = 0.015
+    encoder_weight_decay = 0.010
+    audio_weight_decay = 0.011
+    others_weight_decay = 0.012
     warmup_ratio = 0.008
     lr_scheduler_type = "cosine"
     focal_loss_alpha = 0.6
@@ -59,13 +59,37 @@ class Args:
     max_length = 2048
     sampling_rate = 16000
     max_duration_s = 15
-    save_steps = 5000
-    save_total_limit = 15
+    save_steps = 10
+    save_total_limit = 5
+    use_stable_adam = True
     num_workers = 1
-    fp16 = False
-    bf16 = True
+    fp16 = True
+    bf16 = False
+    save_path = f"./models_1m_test/gliclass-hu-audio-base-fp16-{fp16}-bf16-{bf16}"
+
+class SaveArgsCallback(TrainerCallback):
+    def __init__(self, args_to_save):
+        self.args_to_save = args_to_save
+    
+    def on_save(self, args, state, control, **kwargs):
+        checkpoint_path = os.path.join(
+            args.output_dir, 
+            f"checkpoint-{state.global_step}"
+        )
+
+        if os.path.exists(checkpoint_path):
+            args_dict = {
+                key: getattr(self.args_to_save, key)
+                for key in dir(self.args_to_save)
+                if not key.startswith('_') and not callable(getattr(self.args_to_save, key))
+            }
+            
+            args_file = os.path.join(checkpoint_path, "training_args.json")
+            with open(args_file, 'w') as f:
+                json.dump(args_dict, f, indent=4, default=str)
 
 args = Args()
+save_args_callback = SaveArgsCallback(args)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 random.seed(42)
 
@@ -77,10 +101,10 @@ client = storage.Client()
 gcs_manager = GCSManager(
     gcs_client=client,
     local_cache_dir="./cache",
-    preload_size=5,
+    preload_size=15,
     max_load_workers=10,
-    remaining_preloaded_threshold=1,
-    max_cache_size_mb=100,
+    remaining_preloaded_threshold=5,
+    max_cache_size_mb=1000,
 )
 
 tokenizer = AutoTokenizer.from_pretrained(
@@ -124,7 +148,6 @@ tokenizer.add_tokens(new_words, special_tokens=True)
 model.resize_token_embeddings(len(tokenizer))
 
 world_size = int(os.environ.get("WORLD_SIZE", 1))
-
 print("Creating dataset...")
 if world_size > 1:
     train_dataset = {
@@ -243,6 +266,7 @@ trainer = Trainer(
     tokenizer=tokenizer,
     data_collator=data_collator,
     compute_metrics=compute_metrics,
+    callbacks=[save_args_callback]
 )
 
 print("Starting training...")
