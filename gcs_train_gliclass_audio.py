@@ -31,7 +31,7 @@ class Args:
     model_name = None
     encoder_model_name = "microsoft/deberta-v3-base"
     audio_model_name = "facebook/hubert-large-ls960-ft"
-    data_path = "/home/aleksandrlukasov/multi_gpu_gliclass_audio/sampled_1m.jsonl"
+    data_path = "/home/werent4/GLiClass/data/gliclass-audio-10M-shuffled.jsonl"
     problem_type = "multi_label_classification"
     pooler_type = "first"
     scorer_type = "audio-token-dot"
@@ -44,14 +44,14 @@ class Args:
     shuffle_labels = True
     num_epochs = 1
     batch_size = 1
-    gradient_accumulation_steps = 1
-    encoder_lr = 1e-3
-    audio_lr = 1e-4
+    gradient_accumulation_steps = 4
+    encoder_lr = 1e-5
+    audio_lr = 1e-5
     others_lr = 1e-5
-    encoder_weight_decay = 0.010
-    audio_weight_decay = 0.011
-    others_weight_decay = 0.012
-    warmup_ratio = 0.008
+    encoder_weight_decay = 0.015
+    audio_weight_decay = 0.015
+    others_weight_decay = 0.015
+    warmup_ratio = 0.01
     lr_scheduler_type = "cosine"
     focal_loss_alpha = 0.6
     focal_loss_gamma = 2
@@ -59,13 +59,13 @@ class Args:
     max_length = 2048
     sampling_rate = 16000
     max_duration_s = 15
-    save_steps = 10
-    save_total_limit = 5
+    save_steps = 3200
+    save_total_limit = 10
     use_stable_adam = True
     num_workers = 1
-    fp16 = True
-    bf16 = False
-    save_path = f"./models_1m_test/gliclass-hu-audio-base-fp16-{fp16}-bf16-{bf16}"
+    fp16 = False
+    bf16 = True
+    save_path = f"./models_10m/gliclass-hu-audio-base-fp16-{fp16}-bf16-{bf16}"
 
 class SaveArgsCallback(TrainerCallback):
     def __init__(self, args_to_save):
@@ -101,10 +101,10 @@ client = storage.Client()
 gcs_manager = GCSManager(
     gcs_client=client,
     local_cache_dir="./cache",
-    preload_size=15,
+    preload_size=400,
     max_load_workers=10,
-    remaining_preloaded_threshold=5,
-    max_cache_size_mb=1000,
+    remaining_preloaded_threshold=80,
+    max_cache_size_mb=200000,
 )
 
 tokenizer = AutoTokenizer.from_pretrained(
@@ -247,7 +247,7 @@ training_args = TrainingArguments(
     save_steps=args.save_steps,
     save_total_limit=args.save_total_limit,
     dataloader_num_workers=args.num_workers,
-    logging_steps=1,
+    logging_steps=320,
     use_cpu=not torch.cuda.is_available(),
     use_stable_adam=args.use_stable_adam,
     report_to="none",
