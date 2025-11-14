@@ -124,7 +124,6 @@ class JSONLManager:
     def get_data_slice_generator(self, start: int = 0, end: Optional[int] = None) -> Generator[Dict[str, Any], None, None]:
         line_count = 0
         buffer = ""
-        yielded_count = 0
 
         with open(self.jsonl_path, 'r', encoding='utf-8', buffering=self.buffer_size) as f:
             while True:
@@ -151,7 +150,6 @@ class JSONLManager:
                     try:
                         data = json.loads(line.strip())
                         yield data
-                        yielded_count += 1
                     except json.JSONDecodeError:
                         pass
                     line_count += 1
@@ -160,7 +158,6 @@ class JSONLManager:
                 try:
                     data = json.loads(buffer.strip())
                     yield data
-                    yielded_count += 1
                 except json.JSONDecodeError:
                     pass
 
@@ -176,12 +173,9 @@ class CacheManager:
         self.max_cache_size_mb: Optional[int] = None
         self.cloud_manager: Optional['CloudManager'] = None
         self._initialized: bool = False
-        
-        self.file_sizes: Dict[str, int] = {}
-        
-        self.executor: Optional[ThreadPoolExecutor] = None
-        
-        self.active_cleanups: Set[str] = set()
+        self.local_file_sizes: Dict[str, int] = {}
+        self.cleanup_executor: Optional[ThreadPoolExecutor] = None
+        self.cleanup_log_file = ""
 
     def set_storage_manager(self, cloud_manager: 'CloudManager') -> None:
         self.cloud_manager = cloud_manager
@@ -189,142 +183,102 @@ class CacheManager:
     def init_from_cloud_manager(self) -> None:
         if self.cloud_manager is None:
             raise ValueError("CloudManager must be set before initialization")
+        
         self.local_cache_dir = self.cloud_manager.get_cache_dir()
+        self.cleanup_log_file = os.path.join(Path(self.local_cache_dir), Path("cache_cleanup.log"))
         self.preload_size = self.cloud_manager.get_preload_size()
         self.download_lock = self.cloud_manager.get_download_lock()
         self.max_cache_size_mb = self.cloud_manager.get_max_cache_size()
-        self.executor = ThreadPoolExecutor(
-            max_workers=4,
-            thread_name_prefix="cache_ops"
+        self.cleanup_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="cache_cleanup"
         )
         self._initialized = True
 
     def check_initialized(self) -> None:
         if not self._initialized:
-            raise RuntimeError("CacheManager not initialized")
+            raise RuntimeError("CacheManager not initialized. Call init_from_cloud_manager() first")
 
-    def mark_processed(self, local_path: Union[str, Path]) -> None:
-        path_str = str(local_path)
+    def mark_file_as_processed(self, local_path: str | Path) -> None:
         with self.download_lock:
-            self.processed_files.add(path_str)
+            self.processed_files.add(str(local_path))
 
-    def register_file(self, local_path: Union[str, Path], size_bytes: int) -> None:
-        path_str = str(local_path)
+    def register_file_size(self, local_path: str | Path, size_bytes: int) -> None:
         with self.download_lock:
-            self.file_sizes[path_str] = int(size_bytes)
+            self.local_file_sizes[str(local_path)] = int(size_bytes)
 
-    def unregister_file(self, local_path: Union[str, Path]) -> int:
-        path_str = str(local_path)
-        with self.download_lock:
-            return self.file_sizes.pop(path_str, 0)
+    def _physical_cleanup_files(self, files_to_remove: List[str], rank_str) -> int:
+        # time.sleep(10)
+        # print(f"{rank_str} sleeping 10s")
 
-    def is_processed(self, local_path: Union[str, Path]) -> bool:
-        with self.download_lock:
-            return str(local_path) in self.processed_files
+        real_freed = 0
+        removed_count = 0
+        
+        for local_path in files_to_remove:            
+            try:
+                if os.path.exists(local_path):
+                    file_size = os.path.getsize(local_path)
+                    os.remove(local_path)
+                    real_freed += file_size
+                    removed_count += 1
+            except Exception as e:
+                print("[CLEANUP {rank_str}] Failed to remove {Path(local_path).name}: {e}")#, file= self.cleanup_log_file)
+                warnings.warn(f"[CLEANUP {rank_str}] Failed to remove {Path(local_path).name}: {e}",  UserWarning)
+                pass
+        
+        real_freed_mb = real_freed / (1024 * 1024)
+        print(f"[CLEANUP {rank_str}] Real freed: {real_freed_mb:.2f} MB ({removed_count}/{len(files_to_remove)} files)")#, file= self.cleanup_log_file)
+        
+        return real_freed 
 
-    def is_being_downloaded(self, local_path: Union[str, Path]) -> bool:
-        if not self.cloud_manager:
-            return False
-        with self.download_lock:
-            return str(local_path) in self.cloud_manager.download_futures
+    def cleanup_processed_range_bytes(self, preloaded_data_start: int, preloaded_data_end: int, 
+                                    data_to_iterate: List[Dict[str, Any]], rank) -> int:
+        files_to_remove = []
+        
+        rank_str = f"Rank {rank}" if rank is not None else "Worker"
+        print(f"[CLEANUP {rank_str}] started cleanup")#, file= self.cleanup_log_file)
+        for i in range(preloaded_data_start, min(preloaded_data_end, len(data_to_iterate))):
+            cloud_path = data_to_iterate[i]['audio_path']
+            local_path = get_local_path(cloud_path, self.local_cache_dir)
 
-    def register_file_size(self, local_path: Union[str, Path], size_bytes: int) -> None:
-        self.register_file(local_path, size_bytes)
-    
-    def mark_file_as_processed(self, local_path: Union[str, Path]) -> None:
-        self.mark_processed(local_path)
-    
-    def is_being_cleaned(self, local_path: Union[str, Path]) -> bool:
-        with self.download_lock:
-            return str(local_path) in self.active_cleanups
+            with self.download_lock:
+                is_processed = str(local_path) in self.processed_files
+                is_downloading = self.cloud_manager and str(local_path) in self.cloud_manager.download_futures
+                file_size = self.local_file_sizes.get(str(local_path), 0)
 
-    def get_file_size(self, local_path: Union[str, Path]) -> int:
-        with self.download_lock:
-            return self.file_sizes.get(str(local_path), 0)
+            if is_processed and not is_downloading and file_size > 0:
+                files_to_remove.append(str(local_path))
+        
+        if len(files_to_remove) > 0:
+            logical_freed = 0
+            with self.download_lock:
+                for f in files_to_remove:
+                    logical_freed += self.local_file_sizes.pop(f, 0)
+                    self.processed_files.discard(f)
+                    if self.cloud_manager:
+                        self.cloud_manager.file_status.pop(f, None)
+
+            freed_mb = logical_freed / (1024 * 1024)
+            print(f"[CLEANUP {rank_str}] Range [{preloaded_data_start}:{preloaded_data_end}] -> Submitting {len(files_to_remove)} files ({freed_mb:.2f} MB)")
+            self.cleanup_executor.submit(self._physical_cleanup_files, files_to_remove, rank_str)
+            # future.result()
+            return logical_freed
+        
+        return 0
 
     def get_used_bytes(self) -> int:
         self.check_initialized()
         with self.download_lock:
-            return sum(self.file_sizes.values())
+            total = sum(self.local_file_sizes.values())
+        return int(total)
 
-    def get_max_bytes(self) -> int:
+    def get_max_cache_bytes(self) -> int:
         if self.max_cache_size_mb is None:
             return int(1e18)
         return int(self.max_cache_size_mb * 1024 * 1024)
 
-    def get_free_bytes(self) -> int:
-        return max(0, self.get_max_bytes() - self.get_used_bytes())
-
-    def _remove_files_worker(self, files: List[str]) -> int:
-        total_freed = 0
-        for file_path in files:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    
-                with self.download_lock:
-                    size = self.file_sizes.pop(file_path, 0)
-                    self.processed_files.discard(file_path)
-                    self.active_cleanups.discard(file_path)
-                    if self.cloud_manager:
-                        self.cloud_manager.file_status.pop(file_path, None)
-                    
-                    total_freed += size
-                    
-            except Exception as e:
-                with self.download_lock:
-                    self.active_cleanups.discard(file_path)
-                    
-        return total_freed
-
-    def cleanup_files_async(self, files_to_remove: List[str]) -> None:
-        if not files_to_remove:
-            return
-            
-        with self.download_lock:
-            files = [f for f in files_to_remove if f not in self.active_cleanups]
-            self.active_cleanups.update(files)
-        
-        if files:
-            self.executor.submit(self._remove_files_worker, files)
-
-    def get_removable_files(self, start_idx: int, end_idx: int, 
-                       data_to_iterate: List[Dict]) -> List[str]:
-        removable = []
-        
-        for i in range(start_idx, min(end_idx, len(data_to_iterate))):
-            cloud_path = data_to_iterate[i]['audio_path']
-            local_path = str(get_local_path(cloud_path, self.local_cache_dir))
-            
-            is_proc = self.is_processed(local_path)
-            is_dl = self.is_being_downloaded(local_path) 
-            is_clean = self.is_being_cleaned(local_path)
-            size = self.get_file_size(local_path)
-            
-            print(f"[CLEANUP CHECK] {i}: proc={is_proc}, dl={is_dl}, clean={is_clean}, size={size}")
-            
-            if is_proc and not is_dl and not is_clean and size > 0:
-                removable.append(local_path)
-                print(f"[CLEANUP] Will remove: {Path(local_path).name}")
-                    
-        return removable
-
-    def cleanup_range_async(self, start_idx: int, end_idx: int, 
-                           data_to_iterate: List[Dict]) -> None:
-        files = self.get_removable_files(start_idx, end_idx, data_to_iterate)
-        if files:
-            self.cleanup_files_async(files)
-
-    def get_stats(self) -> Dict[str, Any]:
-        with self.download_lock:
-            return {
-                'files_count': len(self.file_sizes),
-                'processed_count': len(self.processed_files),
-                'used_mb': sum(self.file_sizes.values()) / (1024 * 1024),
-                'max_mb': self.max_cache_size_mb or 0,
-                'free_mb': self.get_free_bytes() / (1024 * 1024),
-                'active_cleanups': len(self.active_cleanups)
-            }
+    def get_free_space_bytes(self) -> int:
+        return max(0, self.get_max_cache_bytes() - self.get_used_bytes())
 
 
 class CloudManager(ABC):
@@ -435,8 +389,7 @@ class CloudManager(ABC):
 
     def get_file_status(self, local_path: str) -> DownloadStatus:
         with self.download_lock:
-            status = self.file_status.get(local_path, DownloadStatus.NOT_STARTED)
-            return status
+            return self.file_status.get(local_path, DownloadStatus.NOT_STARTED)
 
     def get_max_cache_size(self) -> int:
         return self.max_cache_size_mb
@@ -454,7 +407,7 @@ class CloudManager(ABC):
         
         try:
             estimated_size = self.remote_file_sizes.get(cloud_path, 0)
-            free_space = self.cache_manager.get_free_bytes()
+            free_space = self.cache_manager.get_free_space_bytes()
             
             if estimated_size > free_space:
                 with self.download_lock:
@@ -465,15 +418,13 @@ class CloudManager(ABC):
             self._download_file(bucket, key, local_path)
             
             if os.path.exists(local_path):
-                actual_size = os.path.getsize(local_path)
-                self.cache_manager.register_file_size(local_path, actual_size)
                 with self.download_lock:
                     self.file_status[str(local_path)] = DownloadStatus.COMPLETED
                     self.download_stats['completed'] += 1
                     self.download_futures.pop(str(local_path), None)
                 return True
                 
-        except Exception as e:
+        except Exception:
             pass
         
         with self.download_lock:
@@ -494,8 +445,8 @@ class CloudManager(ABC):
                                 batch_size: int) -> int:
         self.estimate_next_batch_size_bytes(data_to_iterate, start - 1, dynamic_size=batch_size)
         
-        free_bytes = self.cache_manager.get_free_bytes()
-        max_cache_bytes = self.cache_manager.get_max_bytes()
+        free_bytes = self.cache_manager.get_free_space_bytes()
+        max_cache_bytes = self.cache_manager.get_max_cache_bytes()
         safety_margin = int(self.safety_margin_percent * max_cache_bytes)
         available_bytes = max(0, free_bytes - safety_margin)
         
@@ -536,7 +487,6 @@ class CloudManager(ABC):
 
     def load_initial_batch(self, data_to_iterate: List[Dict], batch_size: Optional[int] = None) -> int:
         initial_check_size = min(batch_size or self.preload_size, len(data_to_iterate))
-        
         if initial_check_size == 0:
             return -1
         
@@ -545,8 +495,7 @@ class CloudManager(ABC):
         
         try:
             loaded_count = self._prepare_batch_downloads(data_to_iterate, 0, initial_check_size)
-            result = loaded_count - 1 if loaded_count > 0 else -1
-            return result
+            return loaded_count - 1 if loaded_count > 0 else -1
         finally:
             with self.download_lock:
                 self.currently_loading = False
@@ -616,7 +565,6 @@ class CloudManager(ABC):
         
         with self.download_lock:
             self.file_status[str(local_path)] = DownloadStatus.FAILED
-        
         return False
 
 
@@ -656,9 +604,8 @@ class GCSManager(CloudManager):
             bucket = self.client.bucket(bucket_name)
             blob = bucket.blob(blob_name)
             blob.reload()
-            size = blob.size or 0
-            return size
-        except Exception as e:
+            return blob.size or 0
+        except Exception:
             return 0
 
     def _download_file(self, bucket_name: str, blob_name: str, local_path: str) -> None:
@@ -707,83 +654,6 @@ class GCSManager(CloudManager):
         
         total_bytes = cached_bytes + fetched_bytes
         return total_bytes
-
-
-class S3Manager(CloudManager):
-    def __init__(
-        self,
-        s3_client,
-        local_cache_dir: Union[str, Path],
-        preload_size: int = 10,
-        max_load_workers: int = 4,
-        remaining_preloaded_threshold: int = 3,
-        max_cache_size_mb: int = 10240,
-        safety_margin_percent: float = 0.15,
-    ):
-        super().__init__(
-            client=s3_client,
-            local_cache_dir=local_cache_dir,
-            preload_size=preload_size,
-            max_load_workers=max_load_workers,
-            remaining_preloaded_threshold=remaining_preloaded_threshold,
-            max_cache_size_mb=max_cache_size_mb,
-            safety_margin_percent=safety_margin_percent,
-        )
-
-    def _get_thread_prefix(self) -> str:
-        return "s3_downloader"
-
-    def _parse_path(self, path: str) -> Tuple[Optional[str], Optional[str]]:
-        return parse_s3_path(path)
-
-    def _download_file(self, bucket: str, key: str, local_path: str) -> None:
-        self.client.download_file(bucket, key, local_path)
-        actual_size = os.path.getsize(local_path)
-        self.cache_manager.register_file_size(local_path, actual_size)
-
-    def _get_remote_file_size(self, cloud_path: str) -> int:
-        bucket, key = self._parse_path(cloud_path)
-        if bucket is None:
-            return 0
-        
-        try:
-            response = self.client.head_object(Bucket=bucket, Key=key)
-            size = response.get('ContentLength', 0)
-            return size
-        except Exception as e:
-            return 0
-
-    def _get_file_size_by_index(self, data_to_iterate: list[dict], i: int) -> int:
-        cloud_path = data_to_iterate[i]['audio_path']
-        bucket, key = self._parse_path(cloud_path)
-        if bucket is None:
-            return 0
-        
-        try:
-            response = self.client.head_object(Bucket=bucket, Key=key)
-            return response.get('ContentLength', 0)
-        except Exception as e:
-            return 0
-
-    def estimate_next_batch_size_bytes(self, data_to_iterate: list[dict], last_index: int,
-                                      dynamic_size: Optional[int] = None) -> int:
-        size = dynamic_size if dynamic_size is not None else self.preload_size
-        start = last_index + 1
-        end = min(start + size, len(data_to_iterate))
-        
-        if start >= end:
-            return 0
-        
-        futures = [
-            self.download_executor.submit(self._get_file_size_by_index, data_to_iterate, i) 
-            for i in range(start, end)
-        ]
-        sizes = [f.result() for f in futures]
-        
-        total = sum(sizes)
-        return total
-
-
 class GLiClassAudioDataset(IterableDataset):
     def __init__(
         self,
@@ -797,6 +667,8 @@ class GLiClassAudioDataset(IterableDataset):
         sampling_rate: int = 16000,
         max_duration_s: int = 15,
         shuffle_labels: bool = True,
+        rank = None,
+        world_size = -1,
         **json_manger_kwargs
     ) -> None:
         if architecture_type != 'audio-encoder':
@@ -806,6 +678,8 @@ class GLiClassAudioDataset(IterableDataset):
         if sampling_rate is None or max_duration_s is None:
             raise ValueError("When using audio_features_extractor you must specify sampling_rate and max_duration_s")
 
+        self.rank = rank
+        self.world_size = world_size
         self.cloud_manager = cloud_manager
         self.preload_size = self.cloud_manager.get_preload_size()
         self.remaining_preloaded_threshold = self.cloud_manager.get_remaining_preloaded_threshold()
@@ -821,7 +695,7 @@ class GLiClassAudioDataset(IterableDataset):
         self.shuffle_labels = shuffle_labels
 
         self.jsonl_manager = JSONLManager(jsonl_path=dataset_path, **json_manger_kwargs)
-        self.num_examples = 5000000
+        self.num_examples = self.jsonl_manager.count_examples()
 
         self.sampling_rate = sampling_rate
         self.max_duration_s = max_duration_s
@@ -881,14 +755,17 @@ class GLiClassAudioDataset(IterableDataset):
         )
 
     def tokenize_and_prepare_labels_for_audioencoder(self, example: Dict[str, Any], 
-                                                    worker_id) -> Dict[str, torch.Tensor]:
+                                                worker_id) -> Dict[str, torch.Tensor]:
         if self.shuffle_labels:
             random.shuffle(example['all_labels'])
         
         input_text = ''.join(self.prepare_prompt(example) + ['<<AUDIO>>'])
         label2idx = {label: idx for idx, label in enumerate(example['all_labels'])}
 
+        original_len = len(self.tokenizer.encode(input_text, add_special_tokens=True))
+        
         tokenized_inputs = self.tokenize(input_text)
+        tokenized_inputs['original_seq_len'] = original_len
         tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type, worker_id)
 
         audio_data = torch.load(example['audio_path'], weights_only=False)
@@ -898,66 +775,68 @@ class GLiClassAudioDataset(IterableDataset):
         
         return tokenized_inputs
 
+    def __len__(self):
+        if self.world_size > 1:
+            return np.ceil(self.num_examples / self.world_size)
+        return self.num_examples
+
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
-        
-        if torch.distributed.is_initialized():
-            world_size = torch.distributed.get_world_size()
-            rank = torch.distributed.get_rank()
-            per_process = int(np.ceil(self.num_examples / float(world_size)))
-            process_start = rank * per_process
+
+        if self.rank is not None and self.world_size > 1:
+            per_process = int(np.ceil(self.num_examples / float(self.world_size)))
+            process_start = self.rank * per_process
             process_end = min(process_start + per_process, self.num_examples)
         else:
-            process_start, process_end, rank = 0, self.num_examples, 0
+            process_start = 0
+            process_end = self.num_examples
         
         process_data_size = process_end - process_start
         
         if worker_info is None:
             worker_id = "main"
-            worker_start, worker_end = process_start, process_end
+            worker_start = process_start
+            worker_end = process_end
         else:
-            per_worker = int(np.ceil(process_data_size / float(worker_info.num_workers)))
+            num_workers = worker_info.num_workers
             worker_id = worker_info.id
-            worker_start = process_start + (worker_id * per_worker)
+            per_worker = int(np.ceil(process_data_size / float(num_workers)))
+            worker_start = process_start + (worker_id * per_worker) 
             worker_end = min(worker_start + per_worker, process_end)
-        
+
         data_to_iterate = list(self.jsonl_manager.get_data_slice_generator(worker_start, worker_end))
+        print(f"Rank {self.rank} will process: {len(data_to_iterate)} examples")
         
-        max_cache_bytes = self.cache_manager.get_max_bytes()
+        max_cache_bytes = self.cache_manager.get_max_cache_bytes()
         safety_margin = int(self.cloud_manager.safety_margin_percent * max_cache_bytes)
-        
+        print(f"Rank {self.rank} has {max_cache_bytes / (1024 * 1024)} MB of cache; with safety margin: {safety_margin / (1024 * 1024)} MB")
+
         last_preloaded_index = self.cloud_manager.load_initial_batch(data_to_iterate)
-        last_cleaned_index = -1
         
         for counter, example in enumerate(data_to_iterate):
             cloud_path = example['audio_path']
             local_path = get_local_path(cloud_path, self.local_cache_dir)
             
             ensure_result = self.cloud_manager.ensure_loaded(cloud_path)
-            
             if not ensure_result or not os.path.exists(local_path):
                 warnings.warn(f"Skipping {counter}: {Path(local_path).name}", UserWarning)
-                self.cache_manager.mark_processed(local_path)
                 continue
-            
             example['audio_path'] = local_path
-            result = self.tokenize_and_prepare_labels_for_audioencoder(example, worker_id)
-            
-            self.cache_manager.mark_processed(local_path)
+            result = self.tokenize_and_prepare_labels_for_audioencoder(example, self.rank)
+            self.cache_manager.mark_file_as_processed(local_path)
             
             remaining_preloaded = last_preloaded_index - counter
-            
             if remaining_preloaded <= self.remaining_preloaded_threshold:
                 if not self.cloud_manager.get_load_status():
                     self.need_preload = True
             
             if self.need_preload and not self.cloud_manager.get_load_status():
-                cleanup_start = last_cleaned_index + 1
-                cleanup_end = counter - 2
-                    
-                if cleanup_end > cleanup_start:
-                    self.cache_manager.cleanup_range_async(cleanup_start, cleanup_end, data_to_iterate)
-                    last_cleaned_index = cleanup_end - 1
+                cleanup_start = max(last_preloaded_index + 1 - self.preload_size, 0)
+                cleanup_end = last_preloaded_index + 1
+                
+                freed = self.cache_manager.cleanup_processed_range_bytes(
+                    cleanup_start, cleanup_end, data_to_iterate, self.rank
+                )
                 
                 start_idx = last_preloaded_index + 1
                 end_idx = min(start_idx + self.preload_size, len(data_to_iterate))
@@ -966,7 +845,7 @@ class GLiClassAudioDataset(IterableDataset):
                     data_to_iterate, last_preloaded_index, dynamic_size=self.preload_size
                 )
                 
-                free_bytes = self.cache_manager.get_free_bytes()
+                free_bytes = self.cache_manager.get_free_space_bytes()
                 available_bytes_for_new = max(0, free_bytes - safety_margin)
                 
                 actual_loaded = 0
@@ -995,5 +874,4 @@ class GLiClassAudioDataset(IterableDataset):
                 
                 self.cloud_manager.load_next(data_to_iterate, old_index, dynamic_size=actual_loaded)
                 self.need_preload = False
-            
             yield result
