@@ -175,7 +175,7 @@ class CacheManager:
         self._initialized: bool = False
         self.local_file_sizes: Dict[str, int] = {}
         self.cleanup_executor: Optional[ThreadPoolExecutor] = None
-        self.cleanup_log_file = ""
+        self.pending_cleanup_count = 0  
 
     def set_storage_manager(self, cloud_manager: 'CloudManager') -> None:
         self.cloud_manager = cloud_manager
@@ -185,7 +185,6 @@ class CacheManager:
             raise ValueError("CloudManager must be set before initialization")
         
         self.local_cache_dir = self.cloud_manager.get_cache_dir()
-        self.cleanup_log_file = os.path.join(Path(self.local_cache_dir), Path("cache_cleanup.log"))
         self.preload_size = self.cloud_manager.get_preload_size()
         self.download_lock = self.cloud_manager.get_download_lock()
         self.max_cache_size_mb = self.cloud_manager.get_max_cache_size()
@@ -208,8 +207,6 @@ class CacheManager:
             self.local_file_sizes[str(local_path)] = int(size_bytes)
 
     def _physical_cleanup_files(self, files_to_remove: List[str], rank_str) -> int:
-        # time.sleep(10)
-        # print(f"{rank_str} sleeping 10s")
 
         real_freed = 0
         removed_count = 0
@@ -222,13 +219,17 @@ class CacheManager:
                     real_freed += file_size
                     removed_count += 1
             except Exception as e:
-                print("[CLEANUP {rank_str}] Failed to remove {Path(local_path).name}: {e}")#, file= self.cleanup_log_file)
+                print("[CLEANUP {rank_str}] Failed to remove {Path(local_path).name}: {e}")
                 warnings.warn(f"[CLEANUP {rank_str}] Failed to remove {Path(local_path).name}: {e}",  UserWarning)
                 pass
-        
+
+        with self.download_lock:
+            self.pending_cleanup_count -= 1
+
         real_freed_mb = real_freed / (1024 * 1024)
-        print(f"[CLEANUP {rank_str}] Real freed: {real_freed_mb:.2f} MB ({removed_count}/{len(files_to_remove)} files)")#, file= self.cleanup_log_file)
-        
+        print(f"[CLEANUP {rank_str}] Real freed: {real_freed_mb:.2f} MB ({removed_count}/{len(files_to_remove)} files)")
+
+
         return real_freed 
 
     def cleanup_processed_range_bytes(self, preloaded_data_start: int, preloaded_data_end: int, 
@@ -236,7 +237,17 @@ class CacheManager:
         files_to_remove = []
         
         rank_str = f"Rank {rank}" if rank is not None else "Worker"
-        print(f"[CLEANUP {rank_str}] started cleanup")#, file= self.cleanup_log_file)
+
+        with self.download_lock:
+            if self.pending_cleanup_count > 3:
+                print(f"[CLEANUP {rank_str}] WARNING: {self.pending_cleanup_count} pending cleanup tasks! Cleanup not keeping up!")
+                warnings.warn(
+                    f"[CLEANUP {rank_str}] WARNING: {self.pending_cleanup_count} pending cleanup tasks! "
+                    f"Cleanup not keeping up!", 
+                    UserWarning
+                )
+
+        print(f"[CLEANUP {rank_str}] started cleanup")
         for i in range(preloaded_data_start, min(preloaded_data_end, len(data_to_iterate))):
             cloud_path = data_to_iterate[i]['audio_path']
             local_path = get_local_path(cloud_path, self.local_cache_dir)
@@ -257,6 +268,7 @@ class CacheManager:
                     self.processed_files.discard(f)
                     if self.cloud_manager:
                         self.cloud_manager.file_status.pop(f, None)
+                self.pending_cleanup_count += 1
 
             freed_mb = logical_freed / (1024 * 1024)
             print(f"[CLEANUP {rank_str}] Range [{preloaded_data_start}:{preloaded_data_end}] -> Submitting {len(files_to_remove)} files ({freed_mb:.2f} MB)")
@@ -819,6 +831,7 @@ class GLiClassAudioDataset(IterableDataset):
             
             ensure_result = self.cloud_manager.ensure_loaded(cloud_path)
             if not ensure_result or not os.path.exists(local_path):
+                print(f"Rank: {self.rank} Skipping iter #{counter}: {Path(local_path)}")
                 warnings.warn(f"Skipping {counter}: {Path(local_path).name}", UserWarning)
                 continue
             example['audio_path'] = local_path
@@ -830,10 +843,10 @@ class GLiClassAudioDataset(IterableDataset):
                 if not self.cloud_manager.get_load_status():
                     self.need_preload = True
             
-            if self.need_preload and not self.cloud_manager.get_load_status():
-                cleanup_start = max(last_preloaded_index + 1 - self.preload_size, 0)
-                cleanup_end = last_preloaded_index + 1
-                
+            if self.need_preload and not self.cloud_manager.get_load_status():               
+                cleanup_start = max(0, counter - self.preload_size)
+                cleanup_end = counter
+
                 freed = self.cache_manager.cleanup_processed_range_bytes(
                     cleanup_start, cleanup_end, data_to_iterate, self.rank
                 )

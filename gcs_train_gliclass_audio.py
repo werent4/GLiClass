@@ -24,7 +24,7 @@ from transformers.models.clap.configuration_clap import ClapConfig
 from gliclass import GLiClassModelConfig, GLiClassModel
 from gliclass.training import TrainingArguments, Trainer
 from gliclass.data_processing import DataCollatorWithPadding
-from gliclass.audio_data_processing import GLiClassAudioDataset, S3Manager, JSONLManager
+from gliclass.audio_data_processing import GLiClassAudioDataset, JSONLManager
 
 
 class Args:
@@ -67,6 +67,12 @@ class Args:
     bf16 = True
     save_path = f"./models_10m/gliclass-hu-audio-base-fp16-{fp16}-bf16-{bf16}"
 
+
+    preload_size = 2000  # 500 × 0.91 MB ≈ 1820 MB avg
+    max_load_workers = 10
+    remaining_preloaded_threshold = 400  # 400/5it/s = 80 sek buffer (max cache size should be preload size + threshold)
+    total_cache_size_mb = 32768  # 32gb total; 4GB × 8 GPUs
+
 class SaveArgsCallback(TrainerCallback):
     def __init__(self, args_to_save):
         self.args_to_save = args_to_save
@@ -96,16 +102,6 @@ random.seed(42)
 if not os.path.exists(args.data_path):
     raise FileNotFoundError(f"Dataset file not found: {args.data_path}")
 print(f"Dataset file exists: {args.data_path}")
-
-client = storage.Client()
-gcs_manager = GCSManager(
-    gcs_client=client,
-    local_cache_dir="./cache",
-    preload_size=400,
-    max_load_workers=10,
-    remaining_preloaded_threshold=80,
-    max_cache_size_mb=200000,
-)
 
 tokenizer = AutoTokenizer.from_pretrained(
     args.encoder_model_name,
@@ -148,11 +144,20 @@ tokenizer.add_tokens(new_words, special_tokens=True)
 model.resize_token_embeddings(len(tokenizer))
 
 world_size = int(os.environ.get("WORLD_SIZE", 1))
+client = storage.Client()
 print("Creating dataset...")
 if world_size > 1:
     train_dataset = {
         "dataset_path": args.data_path,
-        "cloud_manager": gcs_manager,
+        "gcs_manager_params": {
+                    "gcs_client": client,
+                    "local_cache_dir_template": "./cache/worker_{rank}",
+                    "preload_size": args.preload_size,
+                    "max_load_workers": args.max_load_workers,
+                    "remaining_preloaded_threshold": args.remaining_preloaded_threshold,
+                    "total_cache_size_mb": args.total_cache_size_mb,
+                    "world_size": world_size,
+                },
         "tokenizer": tokenizer,
         "audio_features_extractor": audio_feature_extractor,
         "max_length": args.max_length,
@@ -165,6 +170,14 @@ if world_size > 1:
     }
     total_examples = JSONLManager(args.data_path, True).count_examples()
 else:
+    gcs_manager = GCSManager(
+        gcs_client=client,
+        local_cache_dir="./cache",
+        preload_size=args.preload_size,
+        max_load_workers=args.max_load_workers,
+        remaining_preloaded_threshold=args.remaining_preloaded_threshold,
+        max_cache_size_mb=args.total_cache_size_mb,
+    )
     train_dataset = GLiClassAudioDataset(
         dataset_path=args.data_path,
         cloud_manager=gcs_manager,

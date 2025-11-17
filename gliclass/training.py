@@ -3,7 +3,8 @@ from tqdm import tqdm
 import numpy as np
 import os
 from optimi import StableAdamW
-from gliclass.audio_data_processing import GLiClassAudioDataset
+from gliclass.audio_data_processing import GLiClassAudioDataset, GCSManager
+import time
 from dataclasses import dataclass, field
 import torch
 from transformers.trainer import (
@@ -192,14 +193,27 @@ class Trainer(transformers.Trainer):
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<<AUDIO>>") if hasattr(self, 'tokenizer') else None
 
     def get_train_dataloader(self):
-        if isinstance(self.train_dataset, dict) and dist.get_world_size() > 1:
+        world_size = dist.get_world_size()
+        if isinstance(self.train_dataset, dict) and world_size > 1:
+            rank = dist.get_rank()
+
             print("Creating Dataset inside trainer...")
-            print(f"Distributed world size: {dist.get_world_size()}, rank: {dist.get_rank()}")
+            print(f"Distributed world size: {world_size}, rank: {rank}")
 
             config = self.train_dataset
+            gcs_manager_config = config["gcs_manager_params"]
+
+            gcs_manager = GCSManager(
+                gcs_client=gcs_manager_config["gcs_client"],
+                local_cache_dir=gcs_manager_config["local_cache_dir_template"].format(rank = rank),
+                preload_size=gcs_manager_config["preload_size"],
+                max_load_workers=gcs_manager_config["max_load_workers"],
+                remaining_preloaded_threshold=gcs_manager_config["remaining_preloaded_threshold"],
+                max_cache_size_mb=gcs_manager_config["total_cache_size_mb"] // world_size
+            )
             self.train_dataset = GLiClassAudioDataset(
                 dataset_path= config["dataset_path"],
-                cloud_manager= config["cloud_manager"],
+                cloud_manager= gcs_manager,
                 tokenizer= config["tokenizer"],
                 audio_features_extractor= config["audio_features_extractor"],
                 max_length= config["max_length"],
@@ -209,8 +223,8 @@ class Trainer(transformers.Trainer):
                 max_duration_s= config["max_duration_s"],
                 validate_json_file= config["validate_json_file"],
                 buffer_size= config["buffer_size"],
-                rank = dist.get_rank(),
-                world_size = dist.get_world_size()
+                rank = rank,
+                world_size = world_size
             )
             dataloader = DataLoader(
                 self.train_dataset,
