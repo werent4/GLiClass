@@ -348,7 +348,11 @@ class AudioEncoderZeroShotClassificationPipeline(BaseZeroShotClassificationPipel
             tokenized_inputs = self.prepare_inputs(batch_audio_paths, batch_labels, same_labels=same_labels)
             
             model_output = self.model(**tokenized_inputs)
-            logits = model_output.logits  
+            logits = model_output.logits
+            
+            if logits.dim() == 3:
+                probs = torch.sigmoid(logits)
+                logits = torch.logit(probs.mean(dim=1), eps=1e-6)
             
             if self.classification_type == 'single-label':
                 for i in range(len(batch_audio_paths)):

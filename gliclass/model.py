@@ -213,12 +213,63 @@ class GLiClassBaseModel(nn.Module):
             text_tokens_mask = attention_mask
         return classes_embedding, classes_embedding_mask, text_tokens_embeddings, text_tokens_mask
 
+    # def get_loss(self, logits, labels, classes_embedding=None, classes_embedding_mask=None):
+    #     loss = None
+    #     if labels is not None:
+    #         if self.config.problem_type is None:
+    #             if self.num_labels == 1:
+    #                 # regression task
+    #                 loss_fn = nn.MSELoss()
+    #                 logits = logits.view(-1).to(labels.dtype)
+    #                 loss = loss_fn(logits, labels.view(-1))
+    #             elif labels.dim() == 1 or labels.size(-1) == 1:
+    #                 label_index = (labels >= 0).nonzero()
+    #                 labels = labels.long()
+    #                 if label_index.size(0) > 0:
+    #                     labeled_logits = torch.gather(
+    #                         logits, 0, label_index.expand(label_index.size(0), logits.size(1))
+    #                     )
+    #                     labels = torch.gather(labels, 0, label_index.view(-1))
+    #                     loss_fct = nn.CrossEntropyLoss()
+    #                     loss = loss_fct(labeled_logits.view(-1, self.num_labels).float(), labels.view(-1))
+    #                 else:
+    #                     loss = torch.tensor(0).to(logits)
+    #             else:
+    #                 log_softmax = nn.LogSoftmax(-1)
+    #                 loss = -((log_softmax(logits) * labels).sum(-1)).mean()
+    #         elif self.config.problem_type == "regression":
+    #             loss_fct = nn.MSELoss()
+    #             if self.num_labels == 1:
+    #                 loss = loss_fct(logits.squeeze(), labels.squeeze())
+    #             else:
+    #                 loss = loss_fct(logits, labels)
+    #         elif self.config.problem_type == "single_label_classification":
+    #             loss_fct = nn.CrossEntropyLoss()
+    #             loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+    #         elif self.config.problem_type == "multi_label_classification":
+    #             all_losses = focal_loss_with_logits(logits, labels, 
+    #                                 self.config.focal_loss_alpha, self.config.focal_loss_gamma)
+    #             if classes_embedding_mask is not None:
+    #                 all_losses = all_losses * classes_embedding_mask.float()
+    #             loss = all_losses.mean()
+
+    #         if self.config.contrastive_loss_coef>0 and classes_embedding is not None:
+    #             contrastive_loss = sequence_contrastive_loss(classes_embedding, classes_embedding_mask)
+    #             loss = loss+contrastive_loss*self.config.contrastive_loss_coef
+    #     return loss
+    
     def get_loss(self, logits, labels, classes_embedding=None, classes_embedding_mask=None):
         loss = None
         if labels is not None:
+            if logits.dim() == 3:
+                batch_size, num_tokens, num_classes = logits.shape
+                logits = logits.view(-1, num_classes)
+                labels = labels.unsqueeze(1).expand(-1, num_tokens, -1).reshape(-1, num_classes)
+                if classes_embedding_mask is not None:
+                    classes_embedding_mask = classes_embedding_mask.unsqueeze(1).expand(-1, num_tokens, -1).reshape(-1, num_classes)
+            
             if self.config.problem_type is None:
                 if self.num_labels == 1:
-                    # regression task
                     loss_fn = nn.MSELoss()
                     logits = logits.view(-1).to(labels.dtype)
                     loss = loss_fn(logits, labels.view(-1))
@@ -248,15 +299,17 @@ class GLiClassBaseModel(nn.Module):
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
             elif self.config.problem_type == "multi_label_classification":
                 all_losses = focal_loss_with_logits(logits, labels, 
-                                    self.config.focal_loss_alpha, self.config.focal_loss_gamma)
+                                                    self.config.focal_loss_alpha, 
+                                                    self.config.focal_loss_gamma)
                 if classes_embedding_mask is not None:
                     all_losses = all_losses * classes_embedding_mask.float()
                 loss = all_losses.mean()
-
+                
             if self.config.contrastive_loss_coef>0 and classes_embedding is not None:
                 contrastive_loss = sequence_contrastive_loss(classes_embedding, classes_embedding_mask)
                 loss = loss+contrastive_loss*self.config.contrastive_loss_coef
         return loss
+    
     
 class GLiClassUniEncoder(GLiClassBaseModel):
     def __init__(self, config: GLiClassModelConfig, from_pretrained = False):
