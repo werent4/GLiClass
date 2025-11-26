@@ -32,9 +32,7 @@ class GlobalAvgPooling1D(nn.Module):
         self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
     ):
         if attention_mask is not None:
-            attention_mask = attention_mask.repeat((1, 1, x.shape[-1])).to(
-                dtype=x.dtype
-            )
+            attention_mask = attention_mask.unsqueeze(-1).to(dtype=x.dtype)
             x = x * attention_mask
             return x.sum(1) / attention_mask.sum(1)
         else:

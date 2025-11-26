@@ -771,7 +771,8 @@ class GLiClassAudioDataset(IterableDataset):
         if self.shuffle_labels:
             random.shuffle(example['all_labels'])
         
-        input_text = ''.join(self.prepare_prompt(example) + ['<<AUDIO>>'])
+        input_text = ''.join(self.prepare_prompt(example))
+        
         label2idx = {label: idx for idx, label in enumerate(example['all_labels'])}
 
         original_len = len(self.tokenizer.encode(input_text, add_special_tokens=True))

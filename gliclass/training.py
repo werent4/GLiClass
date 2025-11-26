@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Dict, List, Union, Any, Callable
 from tqdm import tqdm
 import numpy as np
 import os
+import torch.nn.functional as F
 from optimi import StableAdamW
 from gliclass.audio_data_processing import GLiClassAudioDataset, GCSManager
 import time
@@ -191,7 +192,8 @@ class Trainer(transformers.Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<<AUDIO>>") if hasattr(self, 'tokenizer') else None
-
+        self._step_counter = 0
+        
     def get_train_dataloader(self):
         world_size = dist.get_world_size()
         if isinstance(self.train_dataset, dict) and world_size > 1:
@@ -236,8 +238,6 @@ class Trainer(transformers.Trainer):
             )
             return dataloader
         return super().get_train_dataloader()
-
-
 
     def training_step(self, model, inputs, *args, **kwargs) -> torch.Tensor:
         model.train()
@@ -769,6 +769,7 @@ class AnalysisTrainer(Trainer):
         self.step_count = 0
         self.component_param_counts = {}
         self.analyze_model_parameters()
+        self.setup_hooks()
 
     def analyze_model_parameters(self):
         print("Model Parameter Analysis:")

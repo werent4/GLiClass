@@ -1,6 +1,61 @@
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 
+
+class GatherLayer(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input):
+        ctx.save_for_backward(input)
+        if dist.is_available() and dist.is_initialized():
+            output = [torch.zeros_like(input) for _ in range(dist.get_world_size())]
+            dist.all_gather(output, input)
+            return torch.cat(output, dim=0)
+        return input
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, = ctx.saved_tensors
+        if dist.is_available() and dist.is_initialized():
+            rank = dist.get_rank()
+            batch_size = input.shape[0]
+            return grad_output[rank * batch_size:(rank + 1) * batch_size]
+        return grad_output
+
+
+def audio_text_contrastive_loss(audio_embeds, text_embeds, temperature=0.07):
+    batch_size = audio_embeds.shape[0]
+    
+    text_embeds_pooled = text_embeds.mean(dim=1)
+    
+    audio_embeds = F.normalize(audio_embeds, p=2, dim=-1)
+    text_embeds_pooled = F.normalize(text_embeds_pooled, p=2, dim=-1)
+    
+    if dist.is_available() and dist.is_initialized():
+        audio_embeds_all = GatherLayer.apply(audio_embeds)
+        text_embeds_all = GatherLayer.apply(text_embeds_pooled)
+        
+        rank = dist.get_rank()
+    else:
+        audio_embeds_all = audio_embeds
+        text_embeds_all = text_embeds_pooled
+        rank = 0
+
+    sim_matrix_a2t = torch.matmul(audio_embeds, text_embeds_all.T) / temperature
+    
+    labels_a2t = torch.arange(batch_size, device=audio_embeds.device) + rank * batch_size
+    
+    loss_a2t = F.cross_entropy(sim_matrix_a2t, labels_a2t)
+
+    sim_matrix_t2a = torch.matmul(text_embeds_pooled, audio_embeds_all.T) / temperature
+    
+    labels_t2a = torch.arange(batch_size, device=text_embeds_pooled.device) + rank * batch_size
+    
+    loss_t2a = F.cross_entropy(sim_matrix_t2a, labels_t2a)
+    
+    total_loss = (loss_a2t + loss_t2a) / 2
+    
+    return total_loss
 
 def sequence_contrastive_loss(embeddings, mask):
     # embeddings shape: (B, L, D)
