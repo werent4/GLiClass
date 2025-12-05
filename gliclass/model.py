@@ -20,6 +20,7 @@ from .poolings import POOLING2OBJECT
 from .scorers import SCORER2OBJECT
 from .loss_functions import focal_loss_with_logits, sequence_contrastive_loss, audio_text_contrastive_loss
 from .utils import is_module_available, MissedPackageException
+import torch.nn.functional as F
 
 IS_LLM2VEC = is_module_available('llm2vec')
 IS_PEFT = is_module_available('peft')
@@ -260,46 +261,47 @@ class GLiClassBaseModel(nn.Module):
             if logits.dim() == 3:
                 batch_size, num_tokens, num_classes = logits.shape
                 logits = logits.view(-1, num_classes)
-                labels = labels.unsqueeze(1).expand(-1, num_tokens, -1).reshape(-1, num_classes)
-                
+                labels_expanded = labels.unsqueeze(1).expand(-1, num_tokens, -1).reshape(-1, num_classes)
                 if classes_embedding_mask is not None:
                     classes_embedding_mask = classes_embedding_mask.unsqueeze(1).expand(-1, num_tokens, -1).reshape(-1, num_classes)
+            else:
+                labels_expanded = labels
             
             if self.config.problem_type is None:
                 if self.num_labels == 1:
                     loss_fn = nn.MSELoss()
-                    logits = logits.view(-1).to(labels.dtype)
-                    loss = loss_fn(logits, labels.view(-1))
-                elif labels.dim() == 1 or labels.size(-1) == 1:
-                    label_index = (labels >= 0).nonzero()
-                    labels = labels.long()
+                    logits = logits.view(-1).to(labels_expanded.dtype)
+                    loss = loss_fn(logits, labels_expanded.view(-1))
+                elif labels_expanded.dim() == 1 or labels_expanded.size(-1) == 1:
+                    label_index = (labels_expanded >= 0).nonzero()
+                    labels_expanded = labels_expanded.long()
                     if label_index.size(0) > 0:
                         labeled_logits = torch.gather(
                             logits, 0, label_index.expand(label_index.size(0), logits.size(1))
                         )
-                        labels = torch.gather(labels, 0, label_index.view(-1))
+                        labels_expanded = torch.gather(labels_expanded, 0, label_index.view(-1))
                         loss_fct = nn.CrossEntropyLoss()
-                        loss = loss_fct(labeled_logits.view(-1, self.num_labels).float(), labels.view(-1))
+                        loss = loss_fct(labeled_logits.view(-1, self.num_labels).float(), labels_expanded.view(-1))
                     else:
                         loss = torch.tensor(0).to(logits)
                 else:
                     log_softmax = nn.LogSoftmax(-1)
-                    loss = -((log_softmax(logits) * labels).sum(-1)).mean()
-                    
+                    loss = -((log_softmax(logits) * labels_expanded).sum(-1)).mean()
+            
             elif self.config.problem_type == "regression":
                 loss_fct = nn.MSELoss()
                 if self.num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                    loss = loss_fct(logits.squeeze(), labels_expanded.squeeze())
                 else:
-                    loss = loss_fct(logits, labels)
-                    
+                    loss = loss_fct(logits, labels_expanded)
+            
             elif self.config.problem_type == "single_label_classification":
                 loss_fct = nn.CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-                
+                loss = loss_fct(logits.view(-1, self.num_labels), labels_expanded.view(-1))
+            
             elif self.config.problem_type == "multi_label_classification":
                 all_losses = focal_loss_with_logits(
-                    logits, labels,
+                    logits, labels_expanded,
                     self.config.focal_loss_alpha,
                     self.config.focal_loss_gamma
                 )
@@ -307,24 +309,18 @@ class GLiClassBaseModel(nn.Module):
                     all_losses = all_losses * classes_embedding_mask.float()
                 loss = all_losses.mean()
             
-            focal_loss_value = loss.item()
-            
-            text_contrastive_value = 0.0
             if self.config.contrastive_loss_coef > 0 and classes_embedding is not None:
                 contrastive_loss = sequence_contrastive_loss(classes_embedding, classes_embedding_mask)
-                text_contrastive_value = contrastive_loss.item()
                 loss = loss + contrastive_loss * self.config.contrastive_loss_coef
             
-            audio_text_contrastive_value = 0.0
             if self.config.audio_text_contrastive_coef > 0 and audio_embeds is not None and classes_embedding is not None:
                 at_loss = audio_text_contrastive_loss(
                     audio_embeds,
                     classes_embedding,
-                    temperature=getattr(self.config, 'audio_text_temperature', 0.07)
+                    labels,
                 )
-                print(at_loss)
-                print(self.config.audio_text_contrastive_coef)
                 loss = loss + at_loss * self.config.audio_text_contrastive_coef
+        
         return loss
     
     
@@ -761,7 +757,7 @@ class GLiClassAudio(GLiClassBaseModel):
         classes_embedding, classes_embedding_mask = self._extract_class_features(
             outputs[0], input_ids, attention_mask
         )
-        
+        classes_embedding = self.classes_projector(classes_embedding)
         return classes_embedding, classes_embedding_mask
 
     def _extract_class_features(self, token_embeds, input_ids, attention_mask):
@@ -810,13 +806,13 @@ class GLiClassAudio(GLiClassBaseModel):
         classes_embedding, classes_embedding_mask = self.encode_text(input_ids, attention_mask)
         
         if self.config.normalize_features:  
-            audio_pooled = audio_pooled / (audio_pooled.norm(p=2, dim=-1, keepdim=True) + self.epsilon)
-            classes_embedding = classes_embedding / (classes_embedding.norm(p=2, dim=-1, keepdim=True) + self.epsilon)
+            audio_pooled = F.normalize(audio_pooled, p=2, dim=-1)
+            classes_embedding = F.normalize(classes_embedding, p=2, dim=-1)
         
-        logits = self.scorer(audio_pooled.unsqueeze(1), classes_embedding).squeeze(1)
+        logits = torch.bmm(audio_pooled.unsqueeze(1), classes_embedding.transpose(1, 2)).squeeze(1)
         
         if self.config.normalize_features:
-            logits = logits * self.logit_scale.exp().to(classes_embedding.device)
+            logits = logits * self.logit_scale.exp()
         
         loss = self.get_loss(
             logits, 

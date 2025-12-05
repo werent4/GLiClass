@@ -47,16 +47,14 @@ class LstmSeq2SeqEncoder(nn.Module):
 class FeaturesProjector(nn.Module):
     def __init__(self, config: GLiClassModelConfig):
         super().__init__()
-
-        self.linear_1 = nn.Linear(config.encoder_config.hidden_size, config.hidden_size, bias=True)
-        self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(config.encoder_config.hidden_size, config.encoder_config.hidden_size, bias=True)
+        hidden_size = config.encoder_config.hidden_size
+        self.proj = nn.Linear(hidden_size, hidden_size)
+        self.norm = nn.LayerNorm(hidden_size)
 
     def forward(self, features):
-        hidden_states = self.linear_1(features)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
-        return hidden_states
+        x = self.proj(features)
+        x = self.norm(x)
+        return x
 
 class BiEncoderProjector(nn.Module):
     def __init__(self, config: GLiClassModelConfig):
@@ -73,40 +71,18 @@ class BiEncoderProjector(nn.Module):
         return hidden_states
     
 class AudioBiEncoderProjector(nn.Module):
-    def __init__(self, config: GLiClassModelConfig):
+    def __init__(self, config):
         super().__init__()
+        input_dim = config.audio_model_config.hidden_size  
+        output_dim = config.encoder_config.hidden_size    
         
-        input_dim = config.audio_model_config.hidden_size
-        hidden_dim = config.hidden_size
-        output_dim = config.encoder_config.hidden_size
-        num_layers = 4
-        
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
-        
-        self.layers = nn.ModuleList([
-            nn.Sequential(
-                nn.LayerNorm(hidden_dim),
-                nn.Linear(hidden_dim, hidden_dim * 4),
-                ACT2FN[config.projector_hidden_act],
-                nn.Dropout(0.1),
-                nn.Linear(hidden_dim * 4, hidden_dim),
-                nn.Dropout(0.1)
-            ) for _ in range(num_layers)
-        ])
-        
-        self.output_proj = nn.Linear(hidden_dim, output_dim)
-        self.output_norm = nn.LayerNorm(output_dim)
-        
-    def forward(self, features):
-        hidden = self.input_proj(features)
-        
-        for layer in self.layers:
-            hidden = hidden + layer(hidden) 
-        
-        hidden = self.output_proj(hidden)
-        hidden = self.output_norm(hidden)
-        
-        return hidden
+        self.proj = nn.Linear(input_dim, output_dim)
+        self.norm = nn.LayerNorm(output_dim)
+    
+    def forward(self, x, attention_mask=None):
+        x = self.proj(x)  
+        x = self.norm(x)
+        return x
 
 class ClapProjectionLayer(nn.Module):
     def __init__(self, config, hidden_size):
