@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
+from torch import nn
 
 
 class GatherLayer(torch.autograd.Function):
@@ -56,77 +57,79 @@ class GatherLayer(torch.autograd.Function):
     
 #     return total_loss
 
-def audio_text_contrastive_loss(audio_embeds, text_embeds, labels, 
-                                 margin=0.5, collapse_coef=2.0, align_coef=1.0):
-    batch_size, num_classes, dim = text_embeds.shape
-    labels_float = labels.float()
-    neg_mask = 1 - labels_float
+
+class InfoNCELoss(nn.Module):
+    def __init__(self, init_temperature=0.07, margin=0.5):
+        super().__init__()
+        self.log_temperature = nn.Parameter(torch.log(torch.tensor(init_temperature)))
+        self.margin = margin
     
-    all_sim = torch.bmm(audio_embeds.unsqueeze(1), text_embeds.transpose(1, 2)).squeeze(1)
+    @property
+    def temperature(self):
+        return self.log_temperature.exp().clamp(min=0.01, max=100.0)
     
-    pos_sim = (all_sim * labels_float).sum(dim=-1) / labels_float.sum(dim=-1).clamp(min=1)
-    neg_sim = (all_sim * neg_mask).sum(dim=-1) / neg_mask.sum(dim=-1).clamp(min=1)
-    
-    align_loss = (1 - pos_sim).mean()
-    margin_loss = F.relu(neg_sim - pos_sim + margin).mean()
-    
-    audio_sim = audio_embeds @ audio_embeds.T
-    audio_mask = ~torch.eye(batch_size, dtype=torch.bool, device=audio_sim.device)
-    audio_collapse_loss = audio_sim[audio_mask].pow(2).mean()
-    
-    text_mean = text_embeds.mean(dim=0)
-    text_sim = text_mean @ text_mean.T
-    text_mask = ~torch.eye(num_classes, dtype=torch.bool, device=text_sim.device)
-    text_collapse_loss = text_sim[text_mask].pow(2).mean()
-    
-    total_loss = (
-        align_coef * align_loss + 
-        margin_loss + 
-        collapse_coef * (audio_collapse_loss + text_collapse_loss)
-    )
-    
-    with torch.no_grad():
-        gap = (pos_sim - neg_sim).mean().item()
-        a_col = audio_sim[audio_mask].mean().item()
-        t_col = text_sim[text_mask].mean().item()
+    def forward(self, audio_embeds, text_embeds, labels):
+        batch_size, num_classes, dim = text_embeds.shape
+        labels_float = labels.float()
+        neg_mask = 1 - labels_float
         
-        best_f1, best_thresh = 0, 0.5
-        for thresh in [0.3, 0.4, 0.5, 0.6, 0.7]:
-            preds = (all_sim > thresh).float()
+        all_sim = torch.bmm(audio_embeds.unsqueeze(1), text_embeds.transpose(1, 2)).squeeze(1)
+        all_sim_scaled = all_sim / self.temperature
+        
+        log_softmax_a2t = F.log_softmax(all_sim_scaled, dim=-1)
+        loss_a2t = -(log_softmax_a2t * labels_float).sum() / labels_float.sum().clamp(min=1)
+        
+        cross_sim = torch.einsum('jd,ind->ijn', audio_embeds, text_embeds) / self.temperature
+        log_softmax_t2a = F.log_softmax(cross_sim, dim=1)
+        diag_log_prob = torch.diagonal(log_softmax_t2a, dim1=0, dim2=1).T
+        loss_t2a = -(diag_log_prob * labels_float).sum() / labels_float.sum().clamp(min=1)
+        
+        pos_sim = (all_sim * labels_float).sum(dim=-1) / labels_float.sum(dim=-1).clamp(min=1)
+        neg_sim = (all_sim * neg_mask).sum(dim=-1) / neg_mask.sum(dim=-1).clamp(min=1)
+        margin_loss = F.relu(neg_sim - pos_sim + self.margin).mean()
+        
+        loss = (loss_a2t + loss_t2a) / 2 + margin_loss
+        
+        with torch.no_grad():
+            gap = (pos_sim - neg_sim).mean().item()
             
+            pos_mean = pos_sim.mean().item()
+            neg_mean = neg_sim.mean().item()
+            mid = (pos_mean + neg_mean) / 2
+            
+            best_f1, best_thresh = 0, mid
+            for thresh in [mid - 0.15, mid - 0.1, mid - 0.05, mid, mid + 0.05, mid + 0.1, mid + 0.15]:
+                preds = (all_sim > thresh).float()
+                tp = (preds * labels_float).sum()
+                fp = (preds * neg_mask).sum()
+                fn = ((1 - preds) * labels_float).sum()
+                precision = tp / (tp + fp + 1e-8)
+                recall = tp / (tp + fn + 1e-8)
+                f1 = 2 * precision * recall / (precision + recall + 1e-8)
+                if f1 > best_f1:
+                    best_f1 = f1.item()
+                    best_thresh = thresh
+            
+            preds = (all_sim > best_thresh).float()
             tp = (preds * labels_float).sum()
             fp = (preds * neg_mask).sum()
             fn = ((1 - preds) * labels_float).sum()
+            tn = ((1 - preds) * neg_mask).sum()
             
-            precision = tp / (tp + fp + 1e-8)
-            recall = tp / (tp + fn + 1e-8)
-            f1 = 2 * precision * recall / (precision + recall + 1e-8)
+            precision = (tp / (tp + fp + 1e-8)).item()
+            recall = (tp / (tp + fn + 1e-8)).item()
+            f1 = (2 * tp / (2 * tp + fp + fn + 1e-8)).item()
+            acc = ((tp + tn) / (tp + tn + fp + fn + 1e-8)).item()
             
-            if f1 > best_f1:
-                best_f1 = f1.item()
-                best_thresh = thresh
+            top1_preds = all_sim.argmax(dim=-1)
+            top1_targets = labels_float.argmax(dim=-1)
+            top1_acc = (top1_preds == top1_targets).float().mean().item()
+            
+            print(f"pos: {pos_mean:.4f}, neg: {neg_mean:.4f}, gap: {gap:.4f}, temp: {self.temperature.item():.4f}")
+            print(f"loss_a2t: {loss_a2t.item():.4f}, loss_t2a: {loss_t2a.item():.4f}, margin: {margin_loss.item():.4f}")
+            print(f"acc: {acc:.4f}, prec: {precision:.4f}, rec: {recall:.4f}, f1: {f1:.4f}, top1: {top1_acc:.4f}, thresh: {best_thresh:.2f}")
         
-        preds = (all_sim > best_thresh).float()
-        tp = (preds * labels_float).sum()
-        fp = (preds * neg_mask).sum()
-        fn = ((1 - preds) * labels_float).sum()
-        tn = (( 1 - preds) * neg_mask).sum()
-        
-        precision = (tp / (tp + fp + 1e-8)).item()
-        recall = (tp / (tp + fn + 1e-8)).item()
-        f1 = (2 * tp / (2 * tp + fp + fn + 1e-8)).item()
-        acc = ((tp + tn) / (tp + tn + fp + fn + 1e-8)).item()
-        
-        top1_preds = all_sim.argmax(dim=-1)
-        top1_targets = labels_float.argmax(dim=-1)
-        top1_acc = (top1_preds == top1_targets).float().mean().item()
-        
-        print(f"pos: {pos_sim.mean().item():.4f}, neg: {neg_sim.mean().item():.4f}, "
-              f"gap: {gap:.4f}, a_col: {a_col:.4f}, t_col: {t_col:.4f}")
-        print(f"acc: {acc:.4f}, prec: {precision:.4f}, rec: {recall:.4f}, "
-              f"f1: {f1:.4f}, top1: {top1_acc:.4f}, thresh: {best_thresh}")
-    
-    return total_loss
+        return loss
 
 
 # def audio_text_contrastive_loss(audio_embeds, text_embeds, labels, temperature=0.1):
