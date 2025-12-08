@@ -369,94 +369,80 @@ class Trainer(transformers.Trainer):
             decay_parameters = get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS)
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
             
-            audio_encoder_parameters = [name for name, _ in opt_model.named_parameters() if "audio_encoder" in name]
-            text_encoder_parameters = [name for name, _ in opt_model.named_parameters() if "encoder" in name and "audio_encoder" not in name]
+            audio_encoder_params = {n for n, _ in opt_model.named_parameters() if "audio_encoder" in n}
+            text_encoder_params = {n for n, _ in opt_model.named_parameters() 
+                                if "encoder" in n and "audio_encoder" not in n}
+            other_params = {n for n, _ in opt_model.named_parameters() 
+                            if n not in audio_encoder_params and n not in text_encoder_params}
+            
             optimizer_grouped_parameters = []
             
-            # text encoder
             optimizer_grouped_parameters.extend([
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and n in text_encoder_parameters and n not in audio_encoder_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": self.args.weight_decay,
-                    },
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n in text_encoder_parameters and n not in audio_encoder_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": 0.0,
-                    },
+                {
+                    "params": [p for n, p in opt_model.named_parameters() 
+                            if n in text_encoder_params and n in decay_parameters and p.requires_grad],
+                    "weight_decay": self.args.weight_decay,
+                    "lr": self.args.learning_rate,
+                },
+                {
+                    "params": [p for n, p in opt_model.named_parameters() 
+                            if n in text_encoder_params and n not in decay_parameters and p.requires_grad],
+                    "weight_decay": 0.0,
+                    "lr": self.args.learning_rate,
+                },
             ])
             
-            # audio encoder
-            if self.args.audio_lr is not None:
-                optimizer_grouped_parameters.extend([{
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in text_encoder_parameters and n in audio_encoder_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": self.args.audio_weight_decay,
-                        "lr": self.args.audio_lr,
-                    },
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n not in text_encoder_parameters and n in audio_encoder_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": 0.0,
-                        "lr": self.args.audio_lr,
-                    }
-                ])
+            audio_lr = self.args.audio_lr if self.args.audio_lr is not None else self.args.learning_rate
+            audio_wd = self.args.audio_weight_decay if self.args.audio_weight_decay is not None else self.args.weight_decay
             
-            # Others
-            if self.args.others_lr is not None:
-                optimizer_grouped_parameters.extend([
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in text_encoder_parameters and n not in audio_encoder_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": self.args.others_weight_decay,
-                        "lr": self.args.others_lr,
-                    },
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and n not in text_encoder_parameters and n not in audio_encoder_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": 0.0,
-                        "lr": self.args.others_lr,
-                    },
-                ])
-            else:
-                optimizer_grouped_parameters = [
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": self.args.weight_decay,
-                    },
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": 0.0,
-                    },
-                ]
+            optimizer_grouped_parameters.extend([
+                {
+                    "params": [p for n, p in opt_model.named_parameters() 
+                            if n in audio_encoder_params and n in decay_parameters and p.requires_grad],
+                    "weight_decay": audio_wd,
+                    "lr": audio_lr,
+                },
+                {
+                    "params": [p for n, p in opt_model.named_parameters() 
+                            if n in audio_encoder_params and n not in decay_parameters and p.requires_grad],
+                    "weight_decay": 0.0,
+                    "lr": audio_lr,
+                },
+            ])
+            
+            others_lr = self.args.others_lr if self.args.others_lr is not None else self.args.learning_rate
+            others_wd = self.args.others_weight_decay if self.args.others_weight_decay is not None else self.args.weight_decay
+            
+            optimizer_grouped_parameters.extend([
+                {
+                    "params": [p for n, p in opt_model.named_parameters() 
+                            if n in other_params and n in decay_parameters and p.requires_grad],
+                    "weight_decay": others_wd,
+                    "lr": others_lr,
+                },
+                {
+                    "params": [p for n, p in opt_model.named_parameters() 
+                            if n in other_params and n not in decay_parameters and p.requires_grad],
+                    "weight_decay": 0.0,
+                    "lr": others_lr,
+                },
+            ])
+            
+            optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if len(g["params"]) > 0]
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
             
-            use_stable_adam = getattr(self.args, 'use_stable_adam', False)
-            
-            if use_stable_adam:
+            if getattr(self.args, 'use_stable_adam', False):
                 from optimi import StableAdamW
-                
                 stable_adam_kwargs = {
                     'lr': optimizer_kwargs.get('lr', self.args.learning_rate),
                     'betas': optimizer_kwargs.get('betas', (0.9, 0.999)),
                     'eps': optimizer_kwargs.get('eps', 1e-8),
                 }
-                
                 self.optimizer = StableAdamW(optimizer_grouped_parameters, **stable_adam_kwargs)
             else:
                 self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+                
         return self.optimizer
 
 @dataclass

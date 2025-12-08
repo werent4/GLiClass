@@ -21,6 +21,42 @@ from transformers.activations import ACT2FN
 
 from .config import GLiClassModelConfig
 
+
+class AudioMLPProjector(nn.Module):
+    def __init__(self, config: GLiClassModelConfig):
+        super().__init__()
+        input_dim = config.audio_model_config.hidden_size
+        projection_dim = 512
+        
+        self.linear1 = nn.Linear(input_dim, projection_dim)
+        self.activation = nn.ReLU()
+        self.linear2 = nn.Linear(projection_dim, projection_dim)
+    
+    def forward(self, x):
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.linear2(x)
+        return x
+
+
+class TextMLPProjector(nn.Module):
+    def __init__(self, config: GLiClassModelConfig):
+        super().__init__()
+        input_dim = config.encoder_config.hidden_size
+        projection_dim = 512
+        
+        self.linear1 = nn.Linear(input_dim, projection_dim)
+        self.activation = nn.ReLU()
+        self.linear2 = nn.Linear(projection_dim, projection_dim)
+    
+    def forward(self, x):
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.linear2(x)
+        return x
+
+
+
 class LstmSeq2SeqEncoder(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers=1, dropout=0., bidirectional=False):
         super(LstmSeq2SeqEncoder, self).__init__()

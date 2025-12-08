@@ -41,12 +41,12 @@ class Args:
     squeeze_layers = False
     shuffle_labels = True
     num_epochs = 1
-    batch_size = 8
+    batch_size = 11
     gradient_accumulation_steps = 4
     
-    encoder_lr = 1e-6
-    audio_lr = 1e-6
-    others_lr = 1e-6
+    encoder_lr = 1e-5
+    audio_lr = 1e-5
+    others_lr = 1e-3
     encoder_weight_decay = 0.001
     audio_weight_decay = 0.001
     others_weight_decay = 0.001
@@ -63,7 +63,7 @@ class Args:
     max_length = 2048
     sampling_rate = 16000
     max_duration_s = 15
-    save_steps = 100
+    save_steps = 1000
     save_total_limit = 5
     use_stable_adam = False
     num_workers = 1
@@ -147,23 +147,27 @@ tokenizer = AutoTokenizer.from_pretrained(
 )
 audio_feature_extractor = AutoFeatureExtractor.from_pretrained(args.audio_model_name)
 
-# model_builder = ModelBuilder(device, 'knowledgator/gliclass-base-v1.0-lw', tokenizer, args)
-# model = model_builder.swap_layers()
-model = GLiClassModel.from_pretrained('alexandrlukashov/gliclass-focal-loss-7000')
-new_words = ["<<LABEL>>", "<<SEP>>", "<<AUDIO>>"]
-tokenizer.add_tokens(new_words, special_tokens=True)
-model.resize_token_embeddings(len(tokenizer))
-model.model.logit_scale.data.fill_(0.0)      
+model_builder = ModelBuilder(device, 'knowledgator/gliclass-base-v1.0-lw', tokenizer, args)
+model = model_builder.swap_layers()
+# model = GLiClassModel.from_pretrained('alexandrlukashov/gliclass-focal-loss-7000')
+# new_words = ["<<LABEL>>", "<<SEP>>", "<<AUDIO>>"]
+# tokenizer.add_tokens(new_words, special_tokens=True)
+# model.resize_token_embeddings(len(tokenizer))
+# model.model.logit_scale.data.fill_(0.0)      
 # freeze text encoder
 for param in model.parameters():
     param.requires_grad = False
 
-# unfreeze projectors
-for param in model.model.classes_projector.parameters():
-    param.requires_grad = True
-
 for param in model.model.audio_projector.parameters():
     param.requires_grad = True
+    
+for param in model.model.text_projector.parameters():
+    param.requires_grad = True
+
+if hasattr(model.model, 'loss_fn'):
+    for param in model.model.loss_fn.parameters():
+        param.requires_grad = True
+    print(f"temperature unfrozen, current value: {model.model.loss_fn.temperature.item():.4f}")
 
 if hasattr(model.model, 'logit_scale'):
     model.model.logit_scale.requires_grad = True
@@ -284,7 +288,7 @@ training_args = TrainingArguments(
     save_steps=args.save_steps,
     save_total_limit=args.save_total_limit,
     dataloader_num_workers=args.num_workers,
-    logging_steps=10,
+    logging_steps=500,
     use_cpu=not torch.cuda.is_available(),
     use_stable_adam=args.use_stable_adam,
     report_to="none",
