@@ -1,3 +1,8 @@
+import sys
+sys.path.insert(0, '/home/alexandrlukashov/gliclass-audio-experiments/perception_models')
+from pathlib import Path
+from core.audio_visual_encoder import PEAudioVisualTransform
+from core.audio_visual_encoder.pe_audio_only import PEAudioVisual
 import os
 import warnings
 from pathlib import Path
@@ -21,7 +26,6 @@ from .scorers import SCORER2OBJECT
 from .loss_functions import focal_loss_with_logits, sequence_contrastive_loss, InfoNCELoss
 from .utils import is_module_available, MissedPackageException
 import torch.nn.functional as F
-
 IS_LLM2VEC = is_module_available('llm2vec')
 IS_PEFT = is_module_available('peft')
 IS_TURBOT5 = is_module_available('turbot5')
@@ -701,143 +705,109 @@ class GLiClassBiEncoderFused(GLiClassBiEncoder):
             class_embeddings = class_embeddings if output_class_embeddings else None,
         )
     
-
-class GLiClassAudio(GLiClassBaseModel):
-    def __init__(self, config: GLiClassModelConfig, from_pretrained=False):
-        super().__init__(config)
+class GLiClassAudio(nn.Module):
+    def __init__(self, config: GLiClassModelConfig, from_pretrained: bool = True):
+        super().__init__()
+        self.config = config
         
-        if config.encoder_config is None:
-            if config.encoder_model_name is None:
-                raise ValueError("You need to specify encoder model name to use it as a backbone.")
-            config.encoder_config = AutoConfig.from_pretrained(config.encoder_model_name)
+        model_name = getattr(config, 'pe_model_name', 'pe-av-base')
+        pretrained = getattr(config, 'pe_pretrained', True) and from_pretrained
+        
+        self.model = PEAudioVisual.from_config(model_name, pretrained=pretrained)
+        
+        self.logit_scale = nn.Parameter(torch.tensor(config.logit_scale_init_value), requires_grad=False)
+        self.epsilon = 1e-8
+        
+        drop_out = getattr(config, 'hidden_dropout_prob', 0.1)
+        self.dropout = nn.Dropout(drop_out)
 
-        if config.audio_model_config is None:
-            if config.audio_model_name is None:
-                raise ValueError("You need to specify audio model name to use it as a backbone.")
-            config.audio_model_config = AutoConfig.from_pretrained(config.audio_model_name)
-
-        def initialize_encoder(configs, model_name, from_pretrained):
-            if from_pretrained:
-                return AutoModel.from_pretrained(model_name)
+    def get_loss(self, logits, labels, classes_embedding_mask=None):
+        loss = None
+        if labels is not None:
+            if self.config.problem_type == "single_label_classification":
+                loss_fct = nn.CrossEntropyLoss()
+                loss = loss_fct(logits, labels.view(-1).long())
+            elif self.config.problem_type == "multi_label_classification":
+                all_losses = focal_loss_with_logits(
+                    logits, 
+                    labels,
+                    self.config.focal_loss_alpha,
+                    self.config.focal_loss_gamma
+                )
+                if classes_embedding_mask is not None:
+                    all_losses = all_losses * classes_embedding_mask.float()
+                loss = all_losses.mean()
             else:
-                return AutoModel.from_config(configs)
-            
-        self.audio_encoder = initialize_encoder(config.audio_model_config, config.audio_model_name, from_pretrained)
-        self.encoder_model = initialize_encoder(config.encoder_config, config.encoder_model_name, from_pretrained)
-        self.loss_fn = InfoNCELoss(init_temperature=0.07)        
-        self.audio_projector = AudioMLPProjector(config)
-        self.text_projector = TextMLPProjector(config)
-
-    def get_loss(self, logits, labels, audio_embeds, classes_embedding, classes_embedding_mask):
-        return self.loss_fn(audio_embeds, classes_embedding, labels)
-    
-    def encode_audio(self, input_audio_features, audio_attention_mask):
-        input_audio_features = input_audio_features.squeeze(1)
-        audio_attention_mask = audio_attention_mask.squeeze(1)
-        
-        outputs = self.audio_encoder(
-            input_audio_features, 
-            audio_attention_mask, 
-            output_hidden_states=True
-        )
-        hidden_state = outputs.hidden_states[-1]
-
-        audio_mask_downsampled = self.audio_encoder._get_feature_vector_attention_mask(
-            feature_vector_length=hidden_state.shape[1], 
-            attention_mask=audio_attention_mask
-        )
-        
-        audio_pooled = self.pooler(hidden_state, audio_mask_downsampled)
-        audio_pooled = self.dropout(audio_pooled)
-        audio_embeddings = self.audio_projector(audio_pooled)
-
-        return audio_embeddings
-
-    def encode_text(self, input_ids, attention_mask):
-        input_ids = input_ids.squeeze(1)
-        attention_mask = attention_mask.squeeze(1)
-        
-        outputs = self.encoder_model(input_ids=input_ids, attention_mask=attention_mask)
-        
-        classes_embedding, classes_embedding_mask = self._extract_class_features(
-            outputs[0], input_ids, attention_mask
-        )
-        
-        classes_embedding = self.text_projector(classes_embedding)
-        
-        return classes_embedding, classes_embedding_mask
-
-    def _extract_class_features(self, token_embeds, input_ids, attention_mask):
-        batch_size, sequence_length, embed_dim = token_embeds.shape
-
-        class_token_mask = input_ids == self.config.class_token_index
-        num_class_tokens = torch.sum(class_token_mask, dim=-1, keepdim=True)
-        max_embed_dim = num_class_tokens.max()
-        
-        aranged_class_idx = torch.arange(
-            max_embed_dim, 
-            dtype=attention_mask.dtype, 
-            device=token_embeds.device
-        ).expand(batch_size, -1)
-        
-        batch_indices, target_class_idx = torch.where(aranged_class_idx < num_class_tokens)
-        _, class_indices = torch.where(class_token_mask)
-        
-        if not self.config.embed_class_token:
-            class_indices += 1
-
-        classes_embedding = torch.zeros(
-            batch_size, max_embed_dim, embed_dim, 
-            dtype=token_embeds.dtype, device=token_embeds.device
-        )
-        classes_embedding_mask = torch.zeros(
-            batch_size, max_embed_dim, 
-            dtype=attention_mask.dtype, device=token_embeds.device
-        )
-
-        classes_embedding[batch_indices, target_class_idx] = token_embeds[batch_indices, class_indices]
-        classes_embedding_mask[batch_indices, target_class_idx] = 1
-        
-        return classes_embedding, classes_embedding_mask
+                all_losses = focal_loss_with_logits(
+                    logits, 
+                    labels,
+                    self.config.focal_loss_alpha,
+                    self.config.focal_loss_gamma
+                )
+                loss = all_losses.mean()
+        return loss
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None, 
+        input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        input_audio_features: Optional[torch.Tensor] = None,
-        audio_attention_mask: Optional[torch.Tensor] = None,
+        input_values: Optional[torch.Tensor] = None,
+        padding_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
+        labels_mask: Optional[torch.Tensor] = None,
+        output_text_embeddings: Optional[bool] = None,
+        output_class_embeddings: Optional[bool] = None,
+        return_dict: Optional[bool] = True,
         **kwargs
     ):
-        audio_embeddings = self.encode_audio(input_audio_features, audio_attention_mask)
-        classes_embedding, classes_embedding_mask = self.encode_text(input_ids, attention_mask)
+        input_ids = input_ids.squeeze(0)
+        attention_mask = attention_mask.squeeze(0) if attention_mask is not None else None
         
-        if self.config.normalize_features:  
-            audio_embeddings = F.normalize(audio_embeddings, p=2, dim=-1)
-            classes_embedding = F.normalize(classes_embedding, p=2, dim=-1)
+        while input_values.dim() > 3:
+            input_values = input_values.squeeze(0)
+        if input_values.dim() == 2:
+            input_values = input_values.unsqueeze(0)
         
-        logits = torch.bmm(audio_embeddings.unsqueeze(1), classes_embedding.transpose(1, 2)).squeeze(1)
+        if padding_mask is not None:
+            while padding_mask.dim() > 2:
+                padding_mask = padding_mask.squeeze(0)
+            if padding_mask.dim() == 1:
+                padding_mask = padding_mask.unsqueeze(0)
+        
+        if labels is not None:
+            labels = labels.squeeze(0)
+        
+        audio_embed = self.model.encode_audio(input_values, padding_mask=padding_mask)
+        text_embeds = self.model.encode_audio_text(input_ids, attention_mask=attention_mask)
+        
+        if self.config.normalize_features:
+            audio_embed = F.normalize(audio_embed, p=2, dim=-1, eps=self.epsilon)
+            text_embeds = F.normalize(text_embeds, p=2, dim=-1, eps=self.epsilon)
+        
+        audio_embed = self.dropout(audio_embed)
+        
+        logits = audio_embed @ text_embeds.T
         
         if self.config.normalize_features:
             logits = logits * self.logit_scale.exp()
         
-        loss = None
-        if labels is not None:
-            loss = self.get_loss(
-                logits, 
-                labels, 
-                audio_embeds=audio_embeddings,
-                classes_embedding=classes_embedding, 
-                classes_embedding_mask=classes_embedding_mask
-            )
+        if labels_mask is not None:
+            logits = torch.where(labels_mask == 0, -1e3, logits)
         
-        return GLiClassOutput(
-            loss=loss, 
-            logits=logits, 
-            text_embeddings=audio_embeddings,
-            class_embeddings=classes_embedding
-        )
+        if labels is not None and labels.dim() == 1:
+            labels = labels.unsqueeze(0)
+        
+        loss = self.get_loss(logits, labels, classes_embedding_mask=labels_mask)
+        if not return_dict:
+            output = (logits,)
+            return ((loss,) + output) if loss is not None else output
 
+        return GLiClassOutput(
+            loss=loss,
+            logits=logits,
+            text_embeddings=audio_embed if output_text_embeddings else None,
+            class_embeddings=text_embeds if output_class_embeddings else None,
+        )
 
 # class GLiClassAudio(GLiClassBaseModel):
 #     def __init__(self, config: GLiClassModelConfig, from_pretrained=False):

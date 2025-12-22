@@ -666,30 +666,22 @@ class GCSManager(CloudManager):
         
         total_bytes = cached_bytes + fetched_bytes
         return total_bytes
+    
 class GLiClassAudioDataset(IterableDataset):
     def __init__(
         self,
         dataset_path: str | Path,
         cloud_manager: CloudManager,
-        tokenizer: PreTrainedTokenizer,
-        max_length: int = 512,
+        transform: "PEAudioVisualTransform",
         problem_type: str = 'multi_label_classification',
-        architecture_type: str = 'audio-encoder',
-        audio_features_extractor: FeatureExtractionMixin = None,
-        sampling_rate: int = 16000,
-        max_duration_s: int = 15,
         shuffle_labels: bool = True,
+        sampling_rate: int = 16000,
+        target_sampling_rate: int = 48000,
+        min_audio_samples: int = 4800,
         rank = None,
         world_size = -1,
         **json_manger_kwargs
     ) -> None:
-        if architecture_type != 'audio-encoder':
-            raise ValueError("This class was specifically created for 'audio-encoder' arch")
-        if audio_features_extractor is None:
-            raise ValueError("audio_features_extractor was not provided")
-        if sampling_rate is None or max_duration_s is None:
-            raise ValueError("When using audio_features_extractor you must specify sampling_rate and max_duration_s")
-
         self.rank = rank
         self.world_size = world_size
         self.cloud_manager = cloud_manager
@@ -699,94 +691,88 @@ class GLiClassAudioDataset(IterableDataset):
         self.need_preload = False
 
         self.cache_manager = cloud_manager.get_cache_manager()
-        self.tokenizer = tokenizer
-        self.audio_features_extractor = audio_features_extractor
-        self.max_length = max_length
+        self.transform = transform
         self.dataset_path = dataset_path
         self.problem_type = problem_type
         self.shuffle_labels = shuffle_labels
+        self.sampling_rate = sampling_rate
+        self.target_sampling_rate = target_sampling_rate
+        self.min_audio_samples = min_audio_samples
+        
+        if self.sampling_rate != self.target_sampling_rate:
+            self.resampler = Resample(orig_freq=self.sampling_rate, new_freq=self.target_sampling_rate)
+        else:
+            self.resampler = None
 
         self.jsonl_manager = JSONLManager(jsonl_path=dataset_path, **json_manger_kwargs)
         self.num_examples = self.jsonl_manager.count_examples()
 
-        self.sampling_rate = sampling_rate
-        self.max_duration_s = max_duration_s
-        self.max_duration_samples = self.sampling_rate * self.max_duration_s
-
     def get_num_examples(self) -> int:
         return self.num_examples
-
-    def prepare_labels(self, example: Dict[str, Any], label2idx: Dict[str, int], 
-                      problem_type: str, worker_id) -> torch.Tensor:
+    
+    def prepare_labels(
+        self, 
+        true_labels: List[str], 
+        all_labels: List[str],
+        problem_type: str
+    ) -> torch.Tensor:
         if problem_type == 'single_label_classification':
-            labels = label2idx[example['true_labels'][0]]
+            label2idx = {label: idx for idx, label in enumerate(all_labels)}
+            labels = label2idx[true_labels[0]]
         elif problem_type == 'multi_label_classification':
-            if isinstance(example['true_labels'], dict):
-                labels = [example['true_labels'].get(label, 0.) for label in example['all_labels']]
+            if isinstance(true_labels, dict):
+                labels = [true_labels.get(label, 0.) for label in all_labels]
             else:
-                labels = [1. if label in example['true_labels'] else 0. for label in example['all_labels']]
+                labels = [1. if label in true_labels else 0. for label in all_labels]
         else:
             raise NotImplementedError(f"{problem_type} is not implemented.")
         
         return torch.tensor(labels)
 
-    def prepare_prompt(self, example: Dict[str, Any]) -> List[str]:
-        prompt_texts = [f"<<LABEL>>{str(label)}" for label in example['all_labels']]
-        prompt_texts.append('<<SEP>>')
-        return prompt_texts
-
-    def prepare_audio(self, audio_array: Union[np.ndarray, torch.Tensor, List], 
-                     audio_sr: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        if isinstance(audio_array, np.ndarray):
-            audio_array = torch.from_numpy(audio_array).float()
-        elif not isinstance(audio_array, torch.Tensor):
-            audio_array = torch.tensor(audio_array, dtype=torch.float32)
-        else:
-            audio_array = audio_array.float()
-
-        if audio_sr != self.sampling_rate:
-            audio_array = Resample(audio_sr, new_freq=self.sampling_rate)(audio_array)
-
-        audio_inputs = self.audio_features_extractor(
-            audio_array,
-            sampling_rate=self.sampling_rate,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_duration_samples
-        )
-        return audio_inputs["input_values"], audio_inputs["attention_mask"]
-
-    def tokenize(self, texts) -> Dict[str, torch.Tensor]:
-        return self.tokenizer(
-            texts, 
-            truncation=True, 
-            max_length=self.max_length, 
-            padding="max_length", 
-            return_tensors="pt"
-        )
-
-    def tokenize_and_prepare_labels_for_audioencoder(self, example: Dict[str, Any], 
-                                                worker_id) -> Dict[str, torch.Tensor]:
+    def prepare_sample(self, example: Dict[str, Any]) -> Dict[str, Any]:
+        all_labels = example.get('all_labels', [])
+        true_labels = example.get('true_labels', [])
+        
+        if not all_labels:
+            return None
+        
+        all_labels = [l for l in all_labels if l and str(l).strip()]
+        if not all_labels:
+            return None
+        
+        if not true_labels:
+            return None
+        
+        true_labels = [l for l in true_labels if l and str(l).strip()]
+        if not true_labels:
+            return None
+        
+        all_labels = all_labels.copy()
+        
         if self.shuffle_labels:
-            random.shuffle(example['all_labels'])
+            random.shuffle(all_labels)
         
-        input_text = ''.join(self.prepare_prompt(example))
+        audio_tensor = torch.load(example['audio_path'], weights_only=False)
+        audio_tensor = audio_tensor.float()
         
-        label2idx = {label: idx for idx, label in enumerate(example['all_labels'])}
-
-        original_len = len(self.tokenizer.encode(input_text, add_special_tokens=True))
+        if audio_tensor.dim() == 1:
+            audio_tensor = audio_tensor.unsqueeze(0)
         
-        tokenized_inputs = self.tokenize(input_text)
-        tokenized_inputs['original_seq_len'] = original_len
-        tokenized_inputs['labels'] = self.prepare_labels(example, label2idx, self.problem_type, worker_id)
-
-        audio_data = torch.load(example['audio_path'], weights_only=False)
-        audio_sr = example["sample_rate"]
-        tokenized_inputs["input_audio_features"], tokenized_inputs["audio_attention_mask"] = self.prepare_audio(
-            audio_data, audio_sr)
+        if self.resampler is not None:
+            audio_tensor = self.resampler(audio_tensor)
         
-        return tokenized_inputs
+        if audio_tensor.shape[-1] < self.min_audio_samples:
+            return None
+        
+        inputs = self.transform(
+            text=all_labels,
+            audio=[audio_tensor],
+            sampling_rate=self.target_sampling_rate
+        )
+        
+        inputs['labels'] = self.prepare_labels(true_labels, all_labels, self.problem_type)
+        
+        return inputs
 
     def __len__(self):
         if self.world_size > 1:
@@ -818,11 +804,9 @@ class GLiClassAudioDataset(IterableDataset):
             worker_end = min(worker_start + per_worker, process_end)
 
         data_to_iterate = list(self.jsonl_manager.get_data_slice_generator(worker_start, worker_end))
-        print(f"Rank {self.rank} will process: {len(data_to_iterate)} examples")
         
         max_cache_bytes = self.cache_manager.get_max_cache_bytes()
         safety_margin = int(self.cloud_manager.safety_margin_percent * max_cache_bytes)
-        print(f"Rank {self.rank} has {max_cache_bytes / (1024 * 1024)} MB of cache; with safety margin: {safety_margin / (1024 * 1024)} MB")
 
         last_preloaded_index = self.cloud_manager.load_initial_batch(data_to_iterate)
         
@@ -832,11 +816,22 @@ class GLiClassAudioDataset(IterableDataset):
             
             ensure_result = self.cloud_manager.ensure_loaded(cloud_path)
             if not ensure_result or not os.path.exists(local_path):
-                print(f"Rank: {self.rank} Skipping iter #{counter}: {Path(local_path)}")
                 warnings.warn(f"Skipping {counter}: {Path(local_path).name}", UserWarning)
                 continue
+            
             example['audio_path'] = local_path
-            result = self.tokenize_and_prepare_labels_for_audioencoder(example, self.rank)
+            
+            try:
+                result = self.prepare_sample(example)
+            except Exception as e:
+                warnings.warn(f"Skipping {counter} due to error: {e}", UserWarning)
+                self.cache_manager.mark_file_as_processed(local_path)
+                continue
+            
+            if result is None:
+                self.cache_manager.mark_file_as_processed(local_path)
+                continue
+            
             self.cache_manager.mark_file_as_processed(local_path)
             
             remaining_preloaded = last_preloaded_index - counter
@@ -888,4 +883,5 @@ class GLiClassAudioDataset(IterableDataset):
                 
                 self.cloud_manager.load_next(data_to_iterate, old_index, dynamic_size=actual_loaded)
                 self.need_preload = False
+            
             yield result

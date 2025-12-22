@@ -1,17 +1,17 @@
 from typing import Optional, Tuple, Dict, List, Union, Any, Callable
 from tqdm import tqdm
 import numpy as np
+import traceback
 import os
 import torch.nn.functional as F
 from optimi import StableAdamW
 from gliclass.audio_data_processing import GLiClassAudioDataset, GCSManager
 import time
 from dataclasses import dataclass, field
-import torch
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer import (
     is_sagemaker_mp_enabled,
     get_parameter_names,
-    ALL_LAYERNORM_LAYERS,
 )
 import transformers
 from transformers import ZeroShotClassificationPipeline as TransformersClassificationPipeline
@@ -20,6 +20,7 @@ from .pipeline import ZeroShotClassificationPipeline
 from collections import defaultdict
 # from lion_pytorch import Lion
 from torch.utils.data import DataLoader
+import torch
 import torch.distributed as dist
 
 def get_component_name(param_name):
@@ -184,18 +185,19 @@ class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adamw_torch")
     others_lr: Optional[float] = None
     others_weight_decay: Optional[float] = 0.0
-    audio_lr: Optional[float] = None 
-    audio_weight_decay: Optional[float] = 0.0
+    model_lr: Optional[float] = None 
+    model_weight_decay: Optional[float] = 0.0
     use_stable_adam: bool = False
+
 
 class Trainer(transformers.Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.audio_token_id = self.tokenizer.convert_tokens_to_ids("<<AUDIO>>") if hasattr(self, 'tokenizer') else None
         self._step_counter = 0
         
     def get_train_dataloader(self):
-        world_size = dist.get_world_size()
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        
         if isinstance(self.train_dataset, dict) and world_size > 1:
             rank = dist.get_rank()
 
@@ -207,27 +209,25 @@ class Trainer(transformers.Trainer):
 
             gcs_manager = GCSManager(
                 gcs_client=gcs_manager_config["gcs_client"],
-                local_cache_dir=gcs_manager_config["local_cache_dir_template"].format(rank = rank),
+                local_cache_dir=gcs_manager_config["local_cache_dir_template"].format(rank=rank),
                 preload_size=gcs_manager_config["preload_size"],
                 max_load_workers=gcs_manager_config["max_load_workers"],
                 remaining_preloaded_threshold=gcs_manager_config["remaining_preloaded_threshold"],
                 max_cache_size_mb=gcs_manager_config["total_cache_size_mb"] // world_size
             )
+            
             self.train_dataset = GLiClassAudioDataset(
-                dataset_path= config["dataset_path"],
-                cloud_manager= gcs_manager,
-                tokenizer= config["tokenizer"],
-                audio_features_extractor= config["audio_features_extractor"],
-                max_length= config["max_length"],
-                problem_type= config["problem_type"],
-                architecture_type= config["architecture_type"],
-                sampling_rate= config["sampling_rate"],
-                max_duration_s= config["max_duration_s"],
-                validate_json_file= config["validate_json_file"],
-                buffer_size= config["buffer_size"],
-                rank = rank,
-                world_size = world_size
+                dataset_path=config["dataset_path"],
+                cloud_manager=gcs_manager,
+                transform=config["transform"],
+                problem_type=config["problem_type"],
+                shuffle_labels=config.get("shuffle_labels", True),
+                validate_json_file=config.get("validate_json_file", False),
+                buffer_size=config.get("buffer_size", 1000),
+                rank=rank,
+                world_size=world_size
             )
+            
             dataloader = DataLoader(
                 self.train_dataset,
                 batch_size=self.args.per_device_train_batch_size,
@@ -307,31 +307,8 @@ class Trainer(transformers.Trainer):
         prediction_loss_only: bool,
         ignore_keys: Optional[List[str]] = None,
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """
-        Perform an evaluation step on model using inputs.
-        Subclass and override to inject custom behavior.
-        Args:
-            model (nn.Module):
-                The model to evaluate.
-            inputs (Dict[str, Union[torch.Tensor, Any]]):
-                The inputs and targets of the model.
-                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
-                argument labels. Check your model's documentation for all accepted arguments.
-            prediction_loss_only (bool):
-                Whether or not to return the loss only.
-            ignore_keys (List[str], *optional*):
-                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
-                gathering predictions.
-        Return:
-            Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple with the loss,
-            logits and labels (each being optional).
-        """
         try:
             with torch.no_grad():
-                if "labels_text" in inputs:
-                    labels_text = inputs.pop('labels_text')
-                if "input_texts" in inputs:
-                    input_texts = inputs.pop('input_texts')
                 loss = None
                 with self.compute_loss_context_manager():
                     try:
@@ -339,16 +316,8 @@ class Trainer(transformers.Trainer):
                     except Exception as e:
                         raise RuntimeError(f"Error during model forward pass: {str(e)}")
 
-                if not hasattr(outputs, 'loss'):
-                    raise AttributeError("Model output does not contain 'loss' attribute")
                 loss = outputs.loss
-
-                if not hasattr(outputs, 'logits'):
-                    raise AttributeError("Model output does not contain 'logits' attribute")
                 logits = outputs.logits
-
-                if 'labels' not in inputs:
-                    raise KeyError("'labels' not found in input dictionary")
                 labels = inputs['labels']
 
             if prediction_loss_only:
@@ -369,44 +338,26 @@ class Trainer(transformers.Trainer):
             decay_parameters = get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS)
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
             
-            audio_encoder_params = {n for n, _ in opt_model.named_parameters() if "audio_encoder" in n}
-            text_encoder_params = {n for n, _ in opt_model.named_parameters() 
-                                if "encoder" in n and "audio_encoder" not in n}
-            other_params = {n for n, _ in opt_model.named_parameters() 
-                            if n not in audio_encoder_params and n not in text_encoder_params}
+            backbone_params = {n for n, _ in opt_model.named_parameters() if "model." in n}
+            other_params = {n for n, _ in opt_model.named_parameters() if n not in backbone_params}
             
             optimizer_grouped_parameters = []
             
-            optimizer_grouped_parameters.extend([
-                {
-                    "params": [p for n, p in opt_model.named_parameters() 
-                            if n in text_encoder_params and n in decay_parameters and p.requires_grad],
-                    "weight_decay": self.args.weight_decay,
-                    "lr": self.args.learning_rate,
-                },
-                {
-                    "params": [p for n, p in opt_model.named_parameters() 
-                            if n in text_encoder_params and n not in decay_parameters and p.requires_grad],
-                    "weight_decay": 0.0,
-                    "lr": self.args.learning_rate,
-                },
-            ])
-            
-            audio_lr = self.args.audio_lr if self.args.audio_lr is not None else self.args.learning_rate
-            audio_wd = self.args.audio_weight_decay if self.args.audio_weight_decay is not None else self.args.weight_decay
+            model_lr = self.args.model_lr if self.args.model_lr is not None else self.args.learning_rate
+            model_wd = self.args.model_weight_decay if self.args.model_weight_decay is not None else self.args.weight_decay
             
             optimizer_grouped_parameters.extend([
                 {
                     "params": [p for n, p in opt_model.named_parameters() 
-                            if n in audio_encoder_params and n in decay_parameters and p.requires_grad],
-                    "weight_decay": audio_wd,
-                    "lr": audio_lr,
+                            if n in backbone_params and n in decay_parameters and p.requires_grad],
+                    "weight_decay": model_wd,
+                    "lr": model_lr,
                 },
                 {
                     "params": [p for n, p in opt_model.named_parameters() 
-                            if n in audio_encoder_params and n not in decay_parameters and p.requires_grad],
+                            if n in backbone_params and n not in decay_parameters and p.requires_grad],
                     "weight_decay": 0.0,
-                    "lr": audio_lr,
+                    "lr": model_lr,
                 },
             ])
             

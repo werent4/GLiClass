@@ -260,37 +260,55 @@ def pad_2d_tensor(key_data):
     return padded_tensors
 
 class DataCollatorWithPadding:
-    def __init__(self, device = 'cuda:0'):
+    def __init__(self, device='cuda:0'):
         self.device = device
 
     def __call__(self, batch):
         keys = batch[0].keys()
-        padded_batch = {key: [] for key in keys}
+        padded_batch = {}
         
         for key in keys:
             key_data = [item[key] for item in batch]
-            if isinstance(key_data[0], torch.Tensor):
-                if  key_data[0].dim() == 1:
+            
+            if all(v is None for v in key_data):
+                continue
+            
+            non_none_data = [v for v in key_data if v is not None]
+            if not non_none_data:
+                continue
+            
+            first_item = non_none_data[0]
+            
+            if isinstance(first_item, torch.Tensor):
+                dim = first_item.dim()
+                if dim == 0:
+                    padded_batch[key] = torch.stack(key_data)
+                elif dim == 1:
                     padded_batch[key] = pad_sequence(key_data, batch_first=True)
-                elif key_data[0].dim() == 2: 
+                elif dim == 2:
                     padded_batch[key] = pad_2d_tensor(key_data)
-                elif key_data[0].dim() == 3: 
-                    print("USed dim = 3")
-                    padded_batch[key] = torch.stack(key_data) 
-            elif isinstance(key_data[0], list):
-                data_el = "string"
-                if len(key_data[0]):
-                    data_el = key_data[0][0]
-                if isinstance(data_el, str):
+                else:
+                    padded_batch[key] = torch.stack(key_data)
+                    
+            elif isinstance(first_item, (bool, np.bool_)):
+                padded_batch[key] = torch.tensor(key_data, dtype=torch.bool)
+                
+            elif isinstance(first_item, list):
+                if len(first_item) > 0 and isinstance(first_item[0], str):
                     padded_batch[key] = key_data
+                elif len(first_item) > 0 and isinstance(first_item[0], (bool, np.bool_)):
+                    padded_batch[key] = torch.tensor(key_data, dtype=torch.bool)
                 else:
                     max_length = max(len(seq) for seq in key_data)
-                    padded_batch[key] = torch.tensor([seq + [0] * (max_length - len(seq)) 
-                                                        for seq in key_data])
-            elif type(key_data[0]) in {int, float}:
+                    padded_batch[key] = torch.tensor([seq + [0] * (max_length - len(seq)) for seq in key_data])
+                    
+            elif isinstance(first_item, (int, float)):
                 padded_batch[key] = torch.tensor(key_data)
-            elif isinstance(key_data[0], str):
+                
+            elif isinstance(first_item, str):
                 padded_batch[key] = key_data
+                
             else:
-                raise TypeError(f"Unsupported data type: {type(key_data[0])}")
+                padded_batch[key] = key_data
+        
         return padded_batch

@@ -16,26 +16,34 @@ class GLiClassModelConfig(PretrainedConfig):
 
     def __init__(
         self,
+        # Encoder configs (existing)
         encoder_config=None,
         encoder_model=None,
         label_model_config=None,
         label_model_name=None,
         audio_model_config=None,
         audio_model_name=None,
+        
+        # Token indices
         class_token_index=-1,
         text_token_index=-1,
         audio_token_index=-1,
         ignore_index=-100,
+        
+        # Model dimensions
         hidden_size=None,
         projector_hidden_act="gelu",
         projection_dim=512,
         vocab_size=None,
+        
+        # Task config
         problem_type='single_label_classification',
         max_num_classes=25,
         use_lstm=False,
         initializer_range=0.03,
         scorer_type='simple',
         pooling_strategy='first',
+        
         # Focal loss
         focal_loss_alpha=0.5,
         focal_loss_gamma=2,
@@ -43,6 +51,7 @@ class GLiClassModelConfig(PretrainedConfig):
         audio_text_contrastive_coef=0.5,
         audio_text_temperature=0.07,
         learnable_temperature=False,
+        
         # Features
         logit_scale_init_value=2.6592,
         normalize_features=False,
@@ -52,8 +61,15 @@ class GLiClassModelConfig(PretrainedConfig):
         squeeze_layers=False,
         embed_class_token=True,
         init_from_larger_clap=False,
+        
+        # PEAudioVisual specific
+        pe_model_name="pe-av-base",
+        pe_pretrained=True,
+        hidden_dropout_prob=0.1,
+        
         **kwargs,
     ):
+        # === Existing encoder config logic ===
         if isinstance(encoder_config, dict):
             encoder_config["model_type"] = (
                 encoder_config["model_type"]
@@ -106,12 +122,18 @@ class GLiClassModelConfig(PretrainedConfig):
         self.audio_model_name = audio_model_name
 
         if hidden_size is None:
-            self.hidden_size = self.encoder_config.hidden_size
+            if architecture_type == 'audio-encoder' and audio_model_name is None:
+                self.hidden_size = 768  # default for pe-av-base
+            else:
+                self.hidden_size = self.encoder_config.hidden_size
         else:
             self.hidden_size = hidden_size
 
         if vocab_size is None:
-            self.vocab_size = self.encoder_config.vocab_size
+            if architecture_type == 'audio-encoder' and audio_model_name is None:
+                self.vocab_size = 32000  # placeholder
+            else:
+                self.vocab_size = self.encoder_config.vocab_size
         else:
             self.vocab_size = vocab_size
 
@@ -164,5 +186,9 @@ class GLiClassModelConfig(PretrainedConfig):
         self.prompt_first = prompt_first
         self.squeeze_layers = squeeze_layers
         self.embed_class_token = embed_class_token
+        
+        self.pe_model_name = pe_model_name
+        self.pe_pretrained = pe_pretrained
+        self.hidden_dropout_prob = hidden_dropout_prob
 
         super().__init__(**kwargs)

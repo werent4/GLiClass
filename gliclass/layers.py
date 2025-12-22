@@ -25,8 +25,19 @@ from .config import GLiClassModelConfig
 class AudioMLPProjector(nn.Module):
     def __init__(self, config: GLiClassModelConfig):
         super().__init__()
-        input_dim = config.audio_model_config.hidden_size
+        
+        model_name = getattr(config, 'audio_model_name', '').lower()
+        
+        if 'clap' in model_name:
+            input_dim = 1024
+        elif hasattr(config.audio_model_config, 'projection_dim'):
+            input_dim = config.audio_model_config.projection_dim
+        else:
+            input_dim = config.audio_model_config.hidden_size
+        
         projection_dim = 512
+        
+        print(f"[AudioMLPProjector] model_name={model_name}, input_dim={input_dim}, projection_dim={projection_dim}")
         
         self.linear1 = nn.Linear(input_dim, projection_dim)
         self.activation = nn.ReLU()

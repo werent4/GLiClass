@@ -59,40 +59,76 @@ class GatherLayer(torch.autograd.Function):
 
 
 class InfoNCELoss(nn.Module):
-    def __init__(self, init_temperature=0.07, margin=0.5):
+    def __init__(self, init_temperature=0.07, margin=0.5, focal_alpha=0.25, 
+                 focal_gamma=2.0, focal_coef=0.1, accumulation_steps=4):
         super().__init__()
         self.log_temperature = nn.Parameter(torch.log(torch.tensor(init_temperature)))
         self.margin = margin
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
+        self.focal_coef = focal_coef
+        self.accumulation_steps = accumulation_steps
+        
+        self.accumulated_audio = []
+        self.current_step = 0
     
     @property
     def temperature(self):
         return self.log_temperature.exp().clamp(min=0.01, max=100.0)
     
+    def focal_loss(self, inputs, targets):
+        p = torch.sigmoid(inputs)
+        ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+        
+        if self.focal_gamma > 0:
+            p_t = p * targets + (1 - p) * (1 - targets)
+            ce_loss = ce_loss * ((1 - p_t) ** self.focal_gamma)
+        
+        if self.focal_alpha >= 0:
+            alpha_t = self.focal_alpha * targets + (1 - self.focal_alpha) * (1 - targets)
+            ce_loss = alpha_t * ce_loss
+        
+        return ce_loss.mean()
+    
+    def reset_accumulation(self):
+        self.accumulated_audio = []
+        self.current_step = 0
+    
     def forward(self, audio_embeds, text_embeds, labels):
-        batch_size, num_classes, dim = text_embeds.shape
-        labels_float = labels.float()
-        neg_mask = 1 - labels_float
+        self.accumulated_audio.append(audio_embeds.detach())
+        self.current_step += 1
         
         all_sim = torch.bmm(audio_embeds.unsqueeze(1), text_embeds.transpose(1, 2)).squeeze(1)
         all_sim_scaled = all_sim / self.temperature
         
+        labels_float = labels.float()
+        neg_mask = 1 - labels_float
+        
         log_softmax_a2t = F.log_softmax(all_sim_scaled, dim=-1)
         loss_a2t = -(log_softmax_a2t * labels_float).sum() / labels_float.sum().clamp(min=1)
         
-        cross_sim = torch.einsum('jd,ind->ijn', audio_embeds, text_embeds) / self.temperature
-        log_softmax_t2a = F.log_softmax(cross_sim, dim=1)
-        diag_log_prob = torch.diagonal(log_softmax_t2a, dim1=0, dim2=1).T
-        loss_t2a = -(diag_log_prob * labels_float).sum() / labels_float.sum().clamp(min=1)
+        if len(self.accumulated_audio) > 1:
+            all_audio = torch.cat(self.accumulated_audio, dim=0)
+            audio_sim = all_audio @ all_audio.T / self.temperature
+            batch_size = all_audio.shape[0]
+            audio_labels = torch.arange(batch_size, device=all_audio.device)
+            loss_t2a = F.cross_entropy(audio_sim, audio_labels)
+        else:
+            loss_t2a = torch.tensor(0.0, device=audio_embeds.device)
         
         pos_sim = (all_sim * labels_float).sum(dim=-1) / labels_float.sum(dim=-1).clamp(min=1)
         neg_sim = (all_sim * neg_mask).sum(dim=-1) / neg_mask.sum(dim=-1).clamp(min=1)
         margin_loss = F.relu(neg_sim - pos_sim + self.margin).mean()
         
-        loss = (loss_a2t + loss_t2a) / 2 + margin_loss
+        focal_loss = self.focal_loss(all_sim, labels_float)
+        
+        loss = loss_a2t + 0.5 * loss_t2a + margin_loss + self.focal_coef * focal_loss
+        
+        if self.current_step >= self.accumulation_steps:
+            self.reset_accumulation()
         
         with torch.no_grad():
             gap = (pos_sim - neg_sim).mean().item()
-            
             pos_mean = pos_sim.mean().item()
             neg_mean = neg_sim.mean().item()
             mid = (pos_mean + neg_mean) / 2
@@ -125,8 +161,8 @@ class InfoNCELoss(nn.Module):
             top1_targets = labels_float.argmax(dim=-1)
             top1_acc = (top1_preds == top1_targets).float().mean().item()
             
-            print(f"pos: {pos_mean:.4f}, neg: {neg_mean:.4f}, gap: {gap:.4f}, temp: {self.temperature.item():.4f}")
-            print(f"loss_a2t: {loss_a2t.item():.4f}, loss_t2a: {loss_t2a.item():.4f}, margin: {margin_loss.item():.4f}")
+            print(f"pos: {pos_mean:.4f}, neg: {neg_mean:.4f}, gap: {gap:.4f}, temp: {self.temperature.item():.4f}, accum: {len(self.accumulated_audio)}/{self.accumulation_steps}")
+            print(f"loss_a2t: {loss_a2t.item():.4f}, loss_audio_contr: {loss_t2a.item():.4f}, margin: {margin_loss.item():.4f}, focal: {focal_loss.item():.4f}")
             print(f"acc: {acc:.4f}, prec: {precision:.4f}, rec: {recall:.4f}, f1: {f1:.4f}, top1: {top1_acc:.4f}, thresh: {best_thresh:.2f}")
         
         return loss
